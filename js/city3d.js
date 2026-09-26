@@ -29,6 +29,7 @@ const City3D = {
 
   init(canvas) {
     const W = this, scene = W.scene = new THREE.Scene();
+    W.seed = World.seed;
     const q = W.QUAL[W.quality];
     W.camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.5, 600);
     W.camera.position.set(0, 10, 0);
@@ -705,6 +706,7 @@ const City3D = {
 
   /* пересборка статичных объектов после смены сида (мультиплеер) */
   resetStatics() {
+    this.seed = World.seed;
     for (const [k, g] of this.chunks) { this.scene.remove(g); this._disposeGroup(g); }
     this.chunks.clear();
     if (this.groundMesh) { this.scene.remove(this.groundMesh); this.groundMesh.geometry.dispose(); this.groundMesh = null; }

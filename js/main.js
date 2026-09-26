@@ -16,11 +16,12 @@ const Game = {
 
   init() {
     const canvas = document.getElementById('game');
+    // сначала мир (City3D.init читает World.tiles при сборке земли)
+    World.gen(this._seed0());
     City3D.init(canvas);
     HUD.init(document.getElementById('hud'));
     UI.init();
     Bullets.init();
-    World.gen(this._seed0());
     City3D.update(World.START.x, World.START.z);
     Player.init(World.START.x, World.START.z);
 
