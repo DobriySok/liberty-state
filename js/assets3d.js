@@ -57,6 +57,7 @@ const Assets3D = {
       jobs.push(texL.loadAsync(texPath).then(tex => {
         tex.anisotropy = 4;
         tex.magFilter = THREE.LinearFilter;
+        tex.encoding = THREE.sRGBEncoding; // PNG колормэп — sRGB
         this.mats[cat] = new THREE.MeshLambertMaterial({ map: tex });
       }).catch(e => { this.mats[cat] = new THREE.MeshLambertMaterial({ color: 0xb8b2a8 }); }));
       for (const f of files) {
@@ -104,7 +105,9 @@ const Assets3D = {
       model.traverse(o => { if (o.isBone && /Righthand$/i.test(o.name)) handBone = o.name; });
       const skinTex = {};
       for (const s of ['humanMaleA','humanFemaleA','zombieMaleA','zombieFemaleA']) {
-        skinTex[s] = await new THREE.TextureLoader().loadAsync(base + 'skins/' + s + '.png');
+        const t = await new THREE.TextureLoader().loadAsync(base + 'skins/' + s + '.png');
+        t.encoding = THREE.sRGBEncoding;
+        skinTex[s] = t;
       }
       this.char = { proto: model, clips, skinTex, scale, bbH: meshBBH, minY, handBone };
     })().then(() => { done.n++; progress(); }));

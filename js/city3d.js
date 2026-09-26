@@ -39,6 +39,7 @@ const City3D = {
     W.camera.position.set(0, 10, 0);
 
     W.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    W.renderer.outputEncoding = THREE.sRGBEncoding; // корректные цвета sRGB-колормэпов Kenney
     W.renderer.setPixelRatio(Math.min(devicePixelRatio || 1, q.dpr));
     W.renderer.setSize(innerWidth, innerHeight, false);
 
@@ -53,6 +54,7 @@ const City3D = {
     grad.addColorStop(1, '#e8ddc6');
     sg.fillStyle = grad; sg.fillRect(0, 0, 2, 256);
     const skyTex = new THREE.CanvasTexture(skyC);
+    skyTex.encoding = THREE.sRGBEncoding;
     scene.background = skyTex;
     scene.fog = new THREE.Fog(0xcfd8dc, 70, q.fogFar);
 
@@ -117,6 +119,7 @@ const City3D = {
     sign(3, '#9aa0a8', s => { s.fillStyle = '#fff'; s.font = 'bold 24px monospace'; s.textAlign = 'center'; s.fillText('GARAGE', 64, 72); });
     sign(4, '#3f7d4a', s => { s.fillStyle = '#fff'; s.font = 'bold 30px monospace'; s.textAlign = 'center'; s.fillText('CAFE', 64, 76); });
     this.signTex = new THREE.CanvasTexture(sc);
+    this.signTex.encoding = THREE.sRGBEncoding;
   },
 
   /* ---------- геометрия: помощники ---------- */
@@ -252,6 +255,7 @@ const City3D = {
           col += pow(w, 9.0) * 0.12;
           float f = smoothstep(uFogFar * 0.35, uFogFar, distance(vW, cameraPosition));
           gl_FragColor = vec4(mix(col, uFog, f), 0.94);
+          #include <encodings_fragment>
         }`
     });
     this.waterMesh = new THREE.Mesh(geo, mat);
@@ -354,6 +358,7 @@ const City3D = {
           float d = length(gl_PointCoord - 0.5);
           float a = smoothstep(0.5, 0.12, d) * vA;
           gl_FragColor = vec4(vC, a);
+          #include <encodings_fragment>
         }`
     });
     this.smoke = new THREE.Points(mg, mm);
