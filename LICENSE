@@ -23,5 +23,11 @@ SOFTWARE.
 ---
 
 lib/three.min.js — Three.js (c) 2010-2022 Three.js Authors, SPDX-License-Identifier: MIT.
+lib/fflate.min.js — fflate (c) 2015-2023 Feross Aferod, SPDX-License-Identifier: MIT.
+
+3D-модели в assets/ — Kenney (kenney.nl), City Kit, Modular Buildings, Car Kit,
+Animated Characters — лицензия CC0 1.0 Universal (public domain).
+Кредит: https://kenney.nl/assets — использование свободно, кредит не обязателен.
+
 Остальной код и контент проекта — оригинальная разработка, не содержит
 материалов из игр GTA / Rockstar Games.

@@ -72,38 +72,45 @@ const World = {
       for (let x = RUNWAY.x0; x <= RUNWAY.x1; x++)
         if (get(x, y) !== T.ROAD) set(x, y, T.RUNWAY);
 
+    /* --- расчёт «естественной» высоты: модель масштабируется под габарит квартала,
+          высота = высота модели * sxz (без неестественного растяжения) --- */
+    const natH = (varId, w, h, margin) => {
+      const v = Assets3D.v[varId];
+      if (!v) return 8;
+      const sxz = Math.min((w * TILE) / v.bb.w, (h * TILE) / v.bb.d) * margin;
+      return Math.max(4, v.bb.h * sxz);
+    };
+
     // --- POI (построим первыми, чтобы случайные здания не мешали) ---
     const POI_DEFS = [
-      { x0: 50, y0: 50, w: 6, h: 4, ht: 14, type: 'hospital', tint: 0xdfe3e6 },
-      { x0: 86, y0: 50, w: 5, h: 4, ht: 14, type: 'police', tint: 0xc9d4dd },
-      { x0: 52, y0: 68, w: 4, h: 3, ht: 8, type: 'shop', tint: 0xb08968 },
-      { x0: 88, y0: 68, w: 4, h: 3, ht: 8, type: 'shop', tint: 0x9a7b5f },
-      { x0: 68, y0: 100, w: 5, h: 3, ht: 9, type: 'garage', tint: 0x8b8f98 },
-      { x0: 54, y0: 102, w: 3, h: 3, ht: 6, type: 'cafe', tint: 0xc2a878 }
+      { x0: 50, y0: 50, w: 6, h: 4, type: 'hospital', var: 'commercial/building-n' },
+      { x0: 86, y0: 50, w: 5, h: 4, type: 'police', var: 'commercial/building-k' },
+      { x0: 52, y0: 68, w: 4, h: 3, type: 'shop', var: 'commercial/building-c' },
+      { x0: 88, y0: 68, w: 4, h: 3, type: 'shop', var: 'commercial/building-j' },
+      { x0: 68, y0: 100, w: 5, h: 3, type: 'garage', var: 'industrial/building-f' },
+      { x0: 54, y0: 102, w: 3, h: 3, type: 'cafe', var: 'commercial/building-d' }
     ];
     for (const p of POI_DEFS) {
       for (let y = p.y0; y < p.y0 + p.h; y++) for (let x = p.x0; x < p.x0 + p.w; x++) set(x, y, T.BUILDING);
-      W.buildings.push({
-        x0: p.x0, y0: p.y0, w: p.w, h: p.h, ht: p.ht,
-        facade: p.type === 'shop' || p.type === 'cafe' ? 2 : 0, roof: 0,
-        tint: p.tint, poi: p.type
-      });
+      const ht = natH(p.var, p.w, p.h, 0.95);
+      W.buildings.push({ x0: p.x0, y0: p.y0, w: p.w, h: p.h, ht, cls: 'mid', var: p.var, poi: p.type });
       W.pois.push({
         x: (p.x0 + p.w / 2) * TILE, z: (p.y0 + p.h / 2) * TILE,
         w: p.w * TILE, h: p.h * TILE, type: p.type,
         doorX: (p.x0 + p.w / 2) * TILE, doorZ: (p.y0 + p.h + 0.6) * TILE,
         wallZ: (p.y0 + p.h) * TILE + 0.12,
-        ht: p.ht
+        ht: ht
       });
     }
     // хангары и башня на аэродроме
-    const hangar = (x0, y0, w, h, ht, tint) => {
+    const hangar = (x0, y0, w, h, varId) => {
       for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) set(x, y, T.BUILDING);
-      W.buildings.push({ x0, y0, w, h, ht, facade: 1, roof: 1, tint, poi: null });
+      const ht = natH(varId, w, h, 0.95);
+      W.buildings.push({ x0, y0, w, h, ht, cls: 'ind', var: varId, poi: null });
     };
-    hangar(114, 4, 8, 2, 7, 0x9aa2ad);
-    hangar(103, 4, 6, 2, 7, 0x8d95a1);
-    W.buildings.push({ x0: 121, y0: 4, w: 1, h: 1, ht: 22, facade: 3, roof: 0, tint: 0xd8dde3, poi: null }); // башня
+    hangar(114, 4, 8, 2, 'industrial/building-a');
+    hangar(103, 4, 6, 2, 'industrial/building-c');
+    W.buildings.push({ x0: 121, y0: 4, w: 1, h: 1, ht: 24, cls: 'tower', var: 'commercial/building-skyscraper-d', poi: null }); // диспетчерская башня
 
     // --- клетки (кварталы) ---
     const cells = [[3, 13], [17, 29], [33, 45], [49, 61], [65, 77], [81, 93], [97, 109], [113, 124]];
@@ -112,15 +119,20 @@ const World = {
       const t = get(x, y);
       return t === T.GRASS || t === T.PARK || t === T.LOT || t === T.PAVEMENT;
     };
-    const placeB = (x0, y0, w, h, ht, facade, tint, poi) => {
+    const placeB = (x0, y0, w, h, cls, ht, poi, fixedVar) => {
       for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) if (!free(x, y)) return false;
+      const pool = Assets3D.POOLS[cls];
+      const varId = fixedVar || pool[randi(0, pool.length - 1)];
+      const v = Assets3D.v[varId];
+      const finalHt = (cls === 'tower' && ht) ? ht : natH(varId, w, h, 0.85);
       for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) set(x, y, T.BUILDING);
-      W.buildings.push({ x0, y0, w, h, ht, facade, roof: 0, tint, poi: poi || null });
+      W.buildings.push({ x0, y0, w, h, ht: finalHt, cls, var: varId, poi: poi || null });
       return true;
     };
     const tree = (tx, tz) => {
       if (!free(tx, tz) && get(tx, tz) !== T.SAND) return;
-      W.trees.push({ x: (tx + 0.5) * TILE + (rng() - 0.5) * 2, z: (tz + 0.5) * TILE + (rng() - 0.5) * 2, kind: 'tree' });
+      W.trees.push({ x: (tx + 0.5) * TILE + (rng() - 0.5) * 2, z: (tz + 0.5) * TILE + (rng() - 0.5) * 2,
+        kind: 'tree', sz: randi(0, 1) });
     };
     const palm = (tx, tz) => {
       if (get(tx, tz) !== T.SAND && get(tx, tz) !== T.GRASS) return;
@@ -145,24 +157,26 @@ const World = {
         for (let i = 0; i < nB; i++) {
           const w = 4 + randi(0, 2), h = 3 + randi(0, 2);
           const bx = x0 + randi(0, x1 - x0 - w + 1), by = y0 + randi(0, y1 - y0 - h + 1);
-          const ht = Math.round(lerp(52, 18, clamp(dCenter / 4, 0, 1)) + rng() * 8);
-          placeB(bx, by, w, h, ht, randi(0, 1), [0x8a93a5, 0xa59a8a, 0x94a08e, 0x8f8fa8, 0xb3a28c, 0x7f8b9e][randi(0, 5)]);
+          if (rng() < 0.5) {
+            // небоскрёб: чем ближе к центру, тем выше
+            const ht = Math.round(lerp(54, 26, clamp(dCenter / 4, 0, 1)) + rng() * 8);
+            placeB(bx, by, w, h, 'tower', ht);
+          } else placeB(bx, by, w, h, 'mid');
         }
-        for (let i = 0; i < 4; i++) tree(x0 + randi(0, x1 - x0), y0 + randi(0, y1 - y0));
+        for (let i = 0; i < 3; i++) tree(x0 + randi(0, x1 - x0), y0 + randi(0, y1 - y0));
       }
       else if (district === 'residential') {
         const nH = 4 + randi(0, 2);
         for (let i = 0; i < nH; i++) {
           const w = 2 + (rng() < 0.4 ? 1 : 0), h = 2 + (rng() < 0.4 ? 1 : 0);
-          placeB(x0 + randi(0, x1 - x0 - w + 1), y0 + randi(0, y1 - y0 - h + 1), w, h, 6 + randi(0, 3), 2,
-            [0xb5654a, 0xc98a5e, 0xa8785f, 0xd8b088, 0x9e6a52][randi(0, 4)]);
+          placeB(x0 + randi(0, x1 - x0 - w + 1), y0 + randi(0, y1 - y0 - h + 1), w, h, 'house');
         }
         for (let i = 0; i < 5; i++) tree(x0 + randi(0, x1 - x0), y0 + randi(0, y1 - y0));
       }
       else if (district === 'suburbs') {
         for (let i = 0; i < 3; i++) {
           const w = 2, h = 2 + (rng() < 0.5 ? 1 : 0);
-          placeB(x0 + randi(0, x1 - x0 - w + 1), y0 + randi(0, y1 - y0 - h + 1), w, h, 6 + randi(0, 2), 2, [0xb08968, 0xa8927a, 0xc0a080][randi(0, 2)]);
+          placeB(x0 + randi(0, x1 - x0 - w + 1), y0 + randi(0, y1 - y0 - h + 1), w, h, 'house');
         }
         for (let i = 0; i < 4; i++) tree(x0 + randi(0, x1 - x0), y0 + randi(0, y1 - y0));
       }
@@ -171,8 +185,7 @@ const World = {
         const nW = 2 + (rng() < 0.5 ? 1 : 0);
         for (let i = 0; i < nW; i++) {
           const w = 5 + randi(0, 2), h = 3 + randi(0, 2);
-          placeB(x0 + randi(0, x1 - x0 - w + 1), y0 + randi(0, y1 - y0 - h + 1), w, h, 10 + randi(0, 5), 1,
-            [0x8d8d94, 0x968d80, 0x84909a][randi(0, 2)]);
+          placeB(x0 + randi(0, x1 - x0 - w + 1), y0 + randi(0, y1 - y0 - h + 1), w, h, 'ind');
         }
         for (let i = 0; i < 2; i++)
           W.props.push({ x: (x0 + randi(2, x1 - 2) + 0.5) * TILE, z: (y0 + randi(2, y1 - 2) + 0.5) * TILE, kind: 'tank' });
@@ -197,7 +210,7 @@ const World = {
         for (let i = 0; i < 4; i++) tree(x0 + randi(0, x1 - x0), y0 + randi(0, y1 - x0 > y1 - y0 ? y1 - y0 : x1 - x0));
         if (rng() < 0.8) {
           const w = 3, h = 2;
-          placeB(x0 + randi(1, x1 - x0 - w), y0 + randi(1, y1 - y0 - h), w, h, 6, 2, 0xa56a4a);
+          placeB(x0 + randi(1, x1 - x0 - w), y0 + randi(1, y1 - y0 - h), w, h, 'house');
         }
       }
       // 'airport' — травяная зона + ВПП уже проставлены
@@ -213,7 +226,9 @@ const World = {
       { x0: 68, x1: 72, y0: 18, y1: 22, t: T.GRASS },
       { x0: 73, x1: 77, y0: 36, y1: 40, t: T.GRASS },
       { x0: 83, x1: 87, y0: 73, y1: 77, t: T.GRASS },
-      { x0: 103, x1: 107, y0: 43, y1: 47, t: T.LOT }
+      { x0: 103, x1: 107, y0: 43, y1: 47, t: T.LOT },
+      { x0: 98, x1: 100, y0: 21, y1: 23, t: T.LOT },   // водонапорная башня
+      { x0: 103, x1: 106, y0: 42, y1: 45, t: T.LOT }   // ветряк
     ];
     for (const r of RESERVES)
       for (let y = r.y0; y <= r.y1; y++)
@@ -229,6 +244,10 @@ const World = {
       const tx = Math.floor(t.x / TILE), ty = Math.floor(t.z / TILE);
       return !RESERVES.some(r => tx >= r.x0 - 1 && tx <= r.x1 + 1 && ty >= r.y0 - 1 && ty <= r.y1 + 1);
     });
+
+    // фиксированные промышленные ориентиры (не зависят от сида)
+    W.props.push({ x: 99.5 * TILE, z: 22.5 * TILE, kind: 'water-tower' });
+    W.props.push({ x: 104.5 * TILE, z: 43.5 * TILE, kind: 'windmill' });
 
     W.buildRoadGraph();
     // AABB зданий (для камеры)

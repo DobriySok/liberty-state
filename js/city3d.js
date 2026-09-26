@@ -1,8 +1,8 @@
 'use strict';
-/* ================= ГОРОД 3D: Three.js, стриминг чанков =================
-   Мир разбит на чанки 16x16 тайлов (64x64 м). Каждый чанк — минимальный
-   набор мешей (1 геометрия зданий, 1 детальная, instanced-деревья),
-   что держит количество draw calls низким даже на слабых ПК. */
+/* ================= ГОРОД 3D: Three.js, стриминг чанков + 3D-модели =================
+   Мир разбит на чанки 16x16 тайлов (64x64 м): разметка/мебель стримятся по чанкам.
+   Здания и деревья — 3D-модели Kenney (CC0), scene-wide InstancedMesh по вариантам
+   (один draw call на вариант) — мало батчей даже на слабых ПК. */
 
 const City3D = {
   scene: null, camera: null, renderer: null,
@@ -15,8 +15,8 @@ const City3D = {
     med:  { radius: 3, fogFar: 280, dpr: 1, traffic: 14, particles: 0.6 },
     low:  { radius: 2, fogFar: 210, dpr: 1, traffic: 10, particles: 0.35 }
   },
-  atlasTex: null, signTex: null,
-  matDetail: null, matBuilding: null, matTree: null, matTrunk: null,
+  signTex: null,
+  matDetail: null, matTree: null,
   matSign: null, matShadow: null, matDecal: null, matWater: null,
   groundMesh: null, waterMesh: null,
   signMesh: null,
@@ -25,7 +25,11 @@ const City3D = {
   cam: null,
   shake: 0,
   time: 0,
-  _bIdx: null, _tIdx: null,
+  bGroup: null,         // instanced-здания (статичные, на весь мир)
+  landmarks: null,      // водонапорка/ветряк
+  _tIdx: null,
+  UP: null,
+  _m4: null, _q: null, _v: null, _s: null,
 
   init(canvas) {
     const W = this, scene = W.scene = new THREE.Scene();
@@ -42,30 +46,32 @@ const City3D = {
     const skyC = makeCanvas(2, 256);
     const sg = skyC.getContext('2d');
     const grad = sg.createLinearGradient(0, 0, 0, 256);
-    grad.addColorStop(0, '#3a72c0');
-    grad.addColorStop(0.55, '#9fc4e4');
-    grad.addColorStop(0.85, '#e6d9c2');
-    grad.addColorStop(1, '#e6d9c2');
+    grad.addColorStop(0, '#2f6fb8');
+    grad.addColorStop(0.45, '#7db4e2');
+    grad.addColorStop(0.78, '#cfe4ee');
+    grad.addColorStop(0.92, '#e8ddc6');
+    grad.addColorStop(1, '#e8ddc6');
     sg.fillStyle = grad; sg.fillRect(0, 0, 2, 256);
     const skyTex = new THREE.CanvasTexture(skyC);
     scene.background = skyTex;
-    scene.fog = new THREE.Fog(0xd8d2c4, 60, q.fogFar);
+    scene.fog = new THREE.Fog(0xcfd8dc, 70, q.fogFar);
 
     // свет
-    scene.add(new THREE.HemisphereLight(0xbfd8ff, 0x44503c, 0.85));
-    const sun = new THREE.DirectionalLight(0xffe9c9, 1.05);
+    scene.add(new THREE.HemisphereLight(0xcfe4ff, 0x4a5244, 0.72));
+    const sun = new THREE.DirectionalLight(0xffe3b8, 1.18);
     sun.position.set(140, 200, 70);
     scene.add(sun);
 
-    W.buildAtlas();
+    W.buildSignAtlas();
     W.matDetail = new THREE.MeshLambertMaterial({ vertexColors: true });
-    W.matBuilding = new THREE.MeshLambertMaterial({ vertexColors: true, map: W.atlasTex });
     W.matTree = new THREE.MeshLambertMaterial({ color: 0xffffff });
-    W.matTrunk = new THREE.MeshLambertMaterial({ color: 0x8a6b4a });
     W.matPalm = new THREE.MeshLambertMaterial({ vertexColors: true });
     W.matSign = new THREE.MeshBasicMaterial({ map: W.signTex });
-    W.matShadow = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.32, depthWrite: false });
+    W.matShadow = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.3, depthWrite: false });
     W.matDecal = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.75, depthWrite: false });
+
+    W.UP = new THREE.Vector3(0, 1, 0);
+    W._m4 = new THREE.Matrix4(); W._q = new THREE.Quaternion(); W._v = new THREE.Vector3(); W._s = new THREE.Vector3();
 
     W.buildGround();
     W.buildWater();
@@ -74,6 +80,8 @@ const City3D = {
     W.buildDecals();
     W.buildParticles();
     W.buildIndex();
+    W.buildBuildings();
+    W.buildLandmarks();
     W.cam = { pos: new THREE.Vector3(), look: new THREE.Vector3(), init: false };
 
     addEventListener('resize', () => {
@@ -91,81 +99,8 @@ const City3D = {
     if (this.matWater) this.matWater.uniforms.uFogFar.value = q.fogFar;
   },
 
-  /* ---------- атлас текстур (процедурный) ---------- */
-  buildAtlas() {
-    const c = makeCanvas(1024, 1024);
-    const g = c.getContext('2d');
-    const S = 256;
-    const cell = (ix, iy, fn) => { g.save(); g.translate(ix * S, iy * S); g.beginPath(); g.rect(0, 0, S, S); g.clip(); fn(); g.restore(); };
-    const rng = mulberry32(777);
-
-    // Фасад A: сетка окон
-    cell(0, 0, () => {
-      g.fillStyle = '#c6cbd2'; g.fillRect(0, 0, S, S);
-      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
-        g.fillStyle = ((x * 7 + y * 13) % 5 === 0) ? '#ffd98f' : '#3d4c5c';
-        g.fillRect(8 + x * 32, 8 + y * 32, 18, 20);
-        g.fillStyle = 'rgba(255,255,255,0.25)';
-        g.fillRect(8 + x * 32, 8 + y * 32, 18, 4);
-      }
-    });
-    // Фасад B: большие окна
-    cell(1, 0, () => {
-      g.fillStyle = '#cac4ba'; g.fillRect(0, 0, S, S);
-      for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
-        g.fillStyle = ((x + y * 3) % 4 === 1) ? '#ffdf9e' : '#41525f';
-        g.fillRect(12 + x * 64, 14 + y * 64, 42, 34);
-        g.fillStyle = 'rgba(255,255,255,0.3)';
-        g.fillRect(12 + x * 64, 14 + y * 64, 42, 8);
-      }
-    });
-    // Фасад C: магазин (навес + витрина)
-    cell(2, 0, () => {
-      g.fillStyle = '#d2c9b6'; g.fillRect(0, 0, S, S);
-      for (let x = 0; x < 8; x++) {
-        g.fillStyle = '#41525f'; g.fillRect(8 + x * 32, 10, 18, 22);
-        g.fillStyle = '#c8452f'; g.fillRect(0, 96, S, 10);
-        g.fillStyle = (x % 2 === 0) ? '#e8e0d0' : '#c8452f';
-        g.fillRect(x * 32, 106, 32, 26);
-      }
-      g.fillStyle = '#2c3844'; g.fillRect(0, 156, S, S - 156);
-      g.fillStyle = 'rgba(160,200,230,0.35)';
-      for (let x = 0; x < 4; x++) g.fillRect(16 + x * 62, 168, 46, 60);
-      g.fillStyle = '#f0e8d8'; g.fillRect(104, 40, 48, 44);
-    });
-    // Фасад D: стеклянная башня
-    cell(3, 0, () => {
-      g.fillStyle = '#aeb8c4'; g.fillRect(0, 0, S, S);
-      for (let x = 0; x < 8; x++) {
-        g.fillStyle = '#4a5e70'; g.fillRect(8 + x * 32, 0, 20, S);
-        for (let y = 0; y < 8; y++) { g.fillStyle = 'rgba(220,240,255,0.28)'; g.fillRect(8 + x * 32, y * 32 + 2, 20, 3); }
-      }
-    });
-    // Крыши
-    cell(0, 1, () => {
-      g.fillStyle = '#878c94'; g.fillRect(0, 0, S, S);
-      g.strokeStyle = 'rgba(0,0,0,0.18)'; g.lineWidth = 2;
-      for (let i = 0; i <= 4; i++) { g.beginPath(); g.moveTo(i * 64, 0); g.lineTo(i * 64, S); g.stroke(); g.beginPath(); g.moveTo(0, i * 64); g.lineTo(S, i * 64); g.stroke(); }
-      for (let i = 0; i < 3; i++) {
-        const ax = 24 + i * 80, ay = 40 + (i % 2) * 90;
-        g.fillStyle = '#9aa0a8'; g.fillRect(ax, ay, 44, 44);
-        g.fillStyle = '#6f757d'; g.beginPath(); g.arc(ax + 22, ay + 22, 13, 0, TAU); g.fill();
-      }
-    });
-    cell(1, 1, () => {
-      g.fillStyle = '#92989e'; g.fillRect(0, 0, S, S);
-      g.strokeStyle = 'rgba(0,0,0,0.15)'; g.lineWidth = 2;
-      for (let i = 0; i <= 8; i++) { g.beginPath(); g.moveTo(i * 32, 0); g.lineTo(i * 32, S); g.stroke(); }
-      g.fillStyle = '#666c74'; g.beginPath(); g.arc(70, 80, 18, 0, TAU); g.fill();
-      g.beginPath(); g.arc(180, 170, 14, 0, TAU); g.fill();
-      g.fillStyle = '#a8aeb6'; g.fillRect(120, 120, 50, 34);
-    });
-    for (let ix = 0; ix < 4; ix++) for (let iy = 2; iy < 4; iy++)
-      cell(ix, iy, () => { g.fillStyle = '#70747a'; g.fillRect(0, 0, S, S); });
-    const tex = new THREE.CanvasTexture(c);
-    tex.anisotropy = 4;
-    this.atlasTex = tex;
-
+  /* ---------- атлас вывесок (процедурный) ---------- */
+  buildSignAtlas() {
     // Атлас вывесок
     const sc = makeCanvas(640, 128);
     const s = sc.getContext('2d');
@@ -265,8 +200,8 @@ const City3D = {
     const cols = new Float32Array(pos.count * 3);
     const rng = mulberry32(this.seed + 1);
     const TCOL = {
-      0: ['#1c3c56', -0.6], 1: ['#d8c07a', -0.15], 2: ['#3a3a40', 0], 3: ['#9a9da1', 0.06],
-      4: ['#4d8f3f', 0], 5: ['#55555a', 0], 6: ['#46464c', 0], 7: ['#84868c', 0.06], 8: ['#6b6257', 0], 9: ['#3f7d36', 0]
+      0: ['#14324a', -0.6], 1: ['#d9c489', -0.15], 2: ['#2e3036', 0], 3: ['#a09c92', 0.06],
+      4: ['#4f8a3c', 0], 5: ['#4a4a50', 0], 6: ['#3c3e44', 0], 7: ['#8e8a82', 0.06], 8: ['#5d564c', 0], 9: ['#457f33', 0]
     };
     const c = new THREE.Color();
     for (let iy = 0; iy <= MAPH; iy++) for (let ix = 0; ix <= MAPW; ix++) {
@@ -478,19 +413,9 @@ const City3D = {
     }
   },
 
-  /* ---------- индексация чанков ---------- */
+  /* ---------- индексация чанков (деревья) ---------- */
   buildIndex() {
-    this._bIdx = new Map(); this._tIdx = new Map();
-    for (let i = 0; i < World.buildings.length; i++) {
-      const b = World.buildings[i];
-      const cx = Math.floor(b.x0 / this.CH), cy = Math.floor(b.y0 / this.CH);
-      const cx1 = Math.floor((b.x0 + b.w - 1) / this.CH), cy1 = Math.floor((b.y0 + b.h - 1) / this.CH);
-      for (let c = cx; c <= cx1; c++) for (let d = cy; d <= cy1; d++) {
-        const k = c + ',' + d;
-        if (!this._bIdx.has(k)) this._bIdx.set(k, []);
-        this._bIdx.get(k).push(i);
-      }
-    }
+    this._tIdx = new Map();
     for (let i = 0; i < World.trees.length; i++) {
       const t = World.trees[i];
       const k = Math.floor(t.x / this.CHM) + ',' + Math.floor(t.z / this.CHM);
@@ -530,12 +455,6 @@ const City3D = {
           if (LINES.some(v => z >= v * TILE - 1 && z < (v + 2) * TILE + 1)) continue;
           this._quad(db, e - 0.12, z, e + 0.12, z + 6.5, 0.025, 0xc8ccce);
         }
-      }
-      // фонари вдоль дороги
-      if (inZ(L * TILE)) for (let x = x0 * TILE + 4; x < x1 * TILE; x += 20) {
-        this._dbox(db, 0.14, 3.6, 0.14, x, 1.8, (L + 2) * TILE + 1.0, 0x2e3238);
-        this._dbox(db, 0.14, 0.14, 1.4, x, 3.55, (L + 2) * TILE + 0.4, 0x2e3238);
-        this._dbox(db, 0.4, 0.12, 0.6, x, 3.45, (L + 2) * TILE - 0.1, 0xffe9b0);
       }
     }
     // пешеходные переходы
@@ -577,91 +496,223 @@ const City3D = {
         this._quad(db, hx + 0.5, hz - 2.2, hx + 2.2, hz - 0.5, 0.03, 0xe8e8e8);
       }
     }
-    // резервуары
-    for (const pr of World.props) {
-      if (pr.x < x0 * TILE || pr.x >= x1 * TILE || pr.z < z0 * TILE || pr.z >= z1 * TILE) continue;
-      this._cyl(db, 2.2, 3.2, pr.x, 1.6, pr.z, 0x8f959c, 12);
-      this._cyl(db, 2.25, 0.3, pr.x, 3.3, pr.z, 0x6f757c, 12);
-    }
     if (db.pos.length) group.add(new THREE.Mesh(db.build(), this.matDetail));
 
-    // --- здания (один меш, атлас) ---
-    const bi = this._bIdx.get(cx + ',' + cy);
-    if (bi && bi.length) {
-      const bb = this._builder();
-      // [u0, u1, v0, v1]; canvas-строка 0 (фасады) = v 0.75..1, строка 1 (крыши) = v 0.5..0.75
-      const F = [[0, 0.25, 0.75, 1], [0.25, 0.5, 0.75, 1], [0.5, 0.75, 0.75, 1], [0.75, 1, 0.75, 1]];
-      const R = [[0, 0.25, 0.5, 0.75], [0.25, 0.5, 0.5, 0.75]];
-      for (const i of bi) {
-        const b = World.buildings[i];
-        const w = b.w * TILE, h = b.h * TILE;
-        const cxp = (b.x0 + b.w / 2) * TILE, czp = (b.y0 + b.h / 2) * TILE;
-        const f = F[b.facade % F.length], r = R[b.roof % R.length];
-        const sides = [f[0], f[1], f[2], f[3]];
-        this._box(bb, w, b.ht, h, cxp, b.ht / 2, czp, b.tint, { sides, roof: r });
-        // небольшой козырёк у двери POI
-        if (b.poi) this._dbox(bb, 2.6, 0.18, 1.4, cxp, b.ht + 0.4, czp + h / 2 + 0.5, 0x3a3f46);
+    // --- 3D-мебель: фонари, светофоры, знаки, резервуары (instanced по типу) ---
+    const buckets = {};
+    const push = (varId, x, z, ry) => { (buckets[varId] = buckets[varId] || []).push([x, z, ry || 0]); };
+    const PROP_H = {
+      'light-curved': 4.6, 'light-square': 4.0, 'traffic-light': 3.2, 'electricity-pole': 3.5,
+      'road-sign-stop': 1.8, 'road-sign-street': 1.8, 'road-sign-warning': 1.8,
+      'construction-cone': 0.7, 'dumpster': 1.2, 'detail-tank': 3.4
+    };
+    // фонари вдоль дорог (детерминированная сетка 24 м)
+    const nearCross = (p) => LINES.some(v => Math.abs(p - (v + 1) * TILE) < 9);
+    const lampSide = (x, z) => { const t = World.tileAt(x, z); return t === T.SIDEWALK || t === T.PAVEMENT; };
+    for (const L of LINES) {
+      if (inZ(L * TILE)) for (let x = Math.ceil(x0 * TILE / 24) * 24; x < x1 * TILE - 4; x += 24) {
+        if (nearCross(x)) continue;
+        if (lampSide(x + 3, (L + 2) * TILE + 1.1)) push('roads/light-curved', x + 3, (L + 2) * TILE + 1.1, Math.PI);
+        if (lampSide(x + 12, L * TILE - 1.1)) push('roads/light-square', x + 12, L * TILE - 1.1, 0);
       }
-      group.add(new THREE.Mesh(bb.build(), this.matBuilding));
+      if (inX(L * TILE)) for (let z = Math.ceil(z0 * TILE / 24) * 24; z < z1 * TILE - 4; z += 24) {
+        if (nearCross(z)) continue;
+        if (lampSide((L + 2) * TILE + 1.1, z + 3)) push('roads/light-square', (L + 2) * TILE + 1.1, z + 3, Math.PI);
+        if (lampSide(L * TILE - 1.1, z + 12)) push('roads/light-curved', L * TILE - 1.1, z + 12, 0);
+      }
+    }
+    // светофоры и знаки на перекрёстках
+    for (const n of World.nodes) {
+      if (n.x < x0 * TILE || n.x >= x1 * TILE || n.z < z0 * TILE || n.z >= z1 * TILE) continue;
+      const h = (n.i * 2654435761) >>> 0;
+      if (lampSide(n.x + 5.3, n.z + 5.3)) push('roads/traffic-light', n.x + 5.3, n.z + 5.3, 2.35);
+      if (lampSide(n.x - 5.3, n.z - 5.3)) push('roads/traffic-light', n.x - 5.3, n.z - 5.3, 0.79);
+      if (h % 4 < 2) push(['roads/road-sign-stop', 'roads/road-sign-street', 'roads/road-sign-warning'][h % 3], n.x + 5.3, n.z + 0.6, Math.PI);
+    }
+    // промышленность: опоры, конусы, мусорные контейнеры
+    const isInd = cx >= 6 && cy >= 1 && cy <= 5;
+    if (isInd) {
+      for (const L of LINES)
+        if (inZ(L * TILE)) for (let x = Math.ceil(x0 * TILE / 32) * 32; x < x1 * TILE - 6; x += 32)
+          if (!nearCross(x)) push('roads/electricity-pole', x, (L + 2) * TILE + 1.6, 0);
+      const crng = mulberry32((cx * 73856093) ^ (cy * 19349663) ^ 11);
+      for (let i = 0; i < 3; i++) {
+        const L = LINES[Math.floor(crng() * LINES.length)];
+        const along = x0 * TILE + 4 + crng() * (this.CH * TILE - 8);
+        if (crng() < 0.5) push('roads/construction-cone', along, (L + 2) * TILE + 0.8, crng() * TAU);
+        else push('roads/construction-cone', (L + 2) * TILE + 0.8, along, crng() * TAU);
+      }
+      const dx = x0 * TILE + (2 + Math.floor(crng() * 12)) * TILE;
+      const dz = z0 * TILE + (2 + Math.floor(crng() * 12)) * TILE;
+      if (World.tileAt(dx, dz) === T.LOT) push('roads/dumpster', dx, dz, crng() * TAU);
+    }
+    // резервуары у заводов
+    for (const pr of World.props) {
+      if (pr.kind !== 'tank') continue;
+      if (pr.x < x0 * TILE || pr.x >= x1 * TILE || pr.z < z0 * TILE || pr.z >= z1 * TILE) continue;
+      push('industrial/detail-tank', pr.x, pr.z, (pr.x * 0.7) % TAU);
+    }
+    for (const [varId, list] of Object.entries(buckets)) {
+      const vv = Assets3D.v[varId];
+      const mat = Assets3D.mats[varId.split('/')[0]];
+      if (!vv || !mat) continue;
+      const s = (PROP_H[varId.split('/')[1]] || 3) / vv.bb.h;
+      const im = new THREE.InstancedMesh(vv.geo, mat, list.length);
+      for (let i = 0; i < list.length; i++) {
+        this._v.set(list[i][0], 0, list[i][1]);
+        this._q.setFromAxisAngle(this.UP, list[i][2]);
+        this._s.set(s, s, s);
+        this._m4.compose(this._v, this._q, this._s);
+        im.setMatrixAt(i, this._m4);
+      }
+      im.frustumCulled = false;
+      group.add(im);
     }
 
-    // --- деревья (instancing) ---
+    // --- деревья (3D-модели + пальмы, instancing) ---
     const ti = this._tIdx.get(cx + ',' + cy);
     if (ti && ti.length) {
-      let nTree = 0, nPalm = 0;
-      for (const i of ti) if (World.trees[i].kind === 'palm') nPalm++; else nTree++;
-      const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), s = new THREE.Vector3();
-      const c = new THREE.Color();
-      let k = 0;
-      if (nTree) {
-        const trunk = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.22, 0.34, 2.4, 5), this.matTrunk, nTree);
-        const canopy = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1.9, 0), this.matTree, nTree);
-        for (const i of ti) {
-          const t = World.trees[i];
-          if (t.kind !== 'tree') continue;
-          const sc = 0.8 + (i % 7) * 0.06;
-          v.set(t.x, 1.2 * sc, t.z); s.set(sc, sc, sc); q.identity();
-          m4.compose(v, q, s); trunk.setMatrixAt(k, m4);
-          v.set(t.x, 2.6 * sc + 1.1, t.z); s.set(sc * 1.15, sc, sc * 1.15);
-          m4.compose(v, q, s); canopy.setMatrixAt(k, m4);
-          c.setHSL(0.32 + (i % 5) * 0.012, 0.45, 0.3 + (i % 3) * 0.04);
-          canopy.setColorAt(k, c);
-          k++;
-        }
-        trunk.frustumCulled = false; canopy.frustumCulled = false;
-        group.add(trunk); group.add(canopy);
+      const groups = { 'suburban/tree-large': [], 'suburban/tree-small': [], palm: [] };
+      for (const i of ti) {
+        const t = World.trees[i];
+        if (t.kind === 'palm') groups.palm.push(i);
+        else groups[t.sz ? 'suburban/tree-large' : 'suburban/tree-small'].push(i);
       }
-      if (nPalm) {
-        const pg = this._palmGeo();
-        const palm = new THREE.InstancedMesh(pg, this.matPalm, nPalm);
-        k = 0;
-        for (const i of ti) {
-          const t = World.trees[i];
-          if (t.kind !== 'palm') continue;
-          const sc = 0.9 + (i % 5) * 0.05;
-          v.set(t.x, 0, t.z); s.set(sc, sc, sc);
-          q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), (i * 0.7) % TAU);
-          m4.compose(v, q, s); palm.setMatrixAt(k, m4);
-          k++;
+      for (const [key, list] of Object.entries(groups)) {
+        if (!list.length) continue;
+        if (key === 'palm') {
+          const palm = new THREE.InstancedMesh(this._palmGeo(), this.matPalm, list.length);
+          for (let i = 0; i < list.length; i++) {
+            const t = World.trees[list[i]];
+            const sc = 0.9 + (list[i] % 5) * 0.05;
+            this._v.set(t.x, 0, t.z); this._s.set(sc, sc, sc);
+            this._q.setFromAxisAngle(this.UP, (list[i] * 0.7) % TAU);
+            this._m4.compose(this._v, this._q, this._s);
+            palm.setMatrixAt(i, this._m4);
+          }
+          palm.frustumCulled = false;
+          group.add(palm);
+        } else {
+          const vv = Assets3D.v[key], mat = Assets3D.mats.suburban;
+          if (!vv || !mat) continue;
+          const baseH = key.includes('large') ? 6.5 : 4.6;
+          const im = new THREE.InstancedMesh(vv.geo, mat, list.length);
+          for (let i = 0; i < list.length; i++) {
+            const t = World.trees[list[i]];
+            const s = (baseH / vv.bb.h) * (0.85 + ((list[i] * 37) % 10) * 0.04);
+            this._v.set(t.x, 0, t.z); this._s.set(s, s, s);
+            this._q.setFromAxisAngle(this.UP, (list[i] * 0.7) % TAU);
+            this._m4.compose(this._v, this._q, this._s);
+            im.setMatrixAt(i, this._m4);
+          }
+          im.frustumCulled = false;
+          group.add(im);
         }
-        palm.frustumCulled = false;
-        group.add(palm);
       }
     }
 
     group.position.set(0, 0, 0);
     return group;
   },
+
+  /* ---------- здания (3D-модели, scene-wide instancing по вариантам) ---------- */
+  buildBuildings() {
+    if (this.bGroup) { this.scene.remove(this.bGroup); this._disposeGroup(this.bGroup); this.bGroup = null; }
+    if (!Assets3D.ready) return;
+    const byVar = new Map();
+    for (const b of World.buildings) {
+      if (!byVar.has(b.var)) byVar.set(b.var, []);
+      byVar.get(b.var).push(b);
+    }
+    const g = new THREE.Group();
+    for (const [varId, list] of byVar) {
+      const vv = Assets3D.v[varId];
+      const mat = Assets3D.mats[varId.split('/')[0]];
+      if (!vv || !mat) continue;
+      const im = new THREE.InstancedMesh(vv.geo, mat, list.length);
+      for (let i = 0; i < list.length; i++) {
+        const b = list[i];
+        const w = b.w * TILE, d = b.h * TILE;
+        const cxp = (b.x0 + b.w / 2) * TILE, czp = (b.y0 + b.h / 2) * TILE;
+        // ориентация: подгоняем модель под габарит квартала
+        const f0 = Math.min(w / vv.bb.w, d / vv.bb.d);
+        const f90 = Math.min(w / vv.bb.d, d / vv.bb.w);
+        const swap = f90 > f0 * 1.15;
+        const sxz = (swap ? f90 : f0) * (b.cls === 'tower' ? 0.95 : 0.85);
+        const sy = b.cls === 'tower' ? b.ht / vv.bb.h : sxz;
+        const hsh = (b.x0 * 31 + b.y0 * 17 + 3) % 4;
+        const ry = (swap ? Math.PI / 2 : 0) + (hsh % 2 ? Math.PI : 0);
+        this._q.setFromAxisAngle(this.UP, ry);
+        this._v.set(cxp, 0, czp);
+        this._s.set(sxz, sy, sxz);
+        this._m4.compose(this._v, this._q, this._s);
+        im.setMatrixAt(i, this._m4);
+      }
+      im.frustumCulled = false;
+      g.add(im);
+    }
+    this.bGroup = g;
+    this.scene.add(g);
+  },
+
+  /* ---------- промышленные ориентиры (водонапорка, ветряк) ---------- */
+  buildLandmarks() {
+    if (this.landmarks) { this.scene.remove(this.landmarks); this._disposeGroup(this.landmarks); this.landmarks = null; }
+    if (!Assets3D.ready) return;
+    const g = new THREE.Group();
+    const LFILE = { 'water-tower': 'industrial/water-tower', 'windmill': 'industrial/windmill-low' };
+    for (const pr of World.props) {
+      if (!LFILE[pr.kind]) continue;
+      const vv = Assets3D.v[LFILE[pr.kind]], mat = Assets3D.mats.industrial;
+      if (!vv || !mat) continue;
+      const s = (pr.kind === 'water-tower' ? 14 : 22) / vv.bb.h;
+      const mesh = new THREE.Mesh(vv.geo, mat);
+      mesh.scale.setScalar(s);
+      mesh.position.set(pr.x, 0, pr.z);
+      g.add(mesh);
+    }
+    this.landmarks = g;
+    this.scene.add(g);
+  },
   _palmGeo() {
     if (this._palmCache) return this._palmCache;
     const b = this._builder();
-    this._cyl(b, 0.16, 3.6, 0, 1.8, 0, 0x9a7b52, 6);
-    for (let i = 0; i < 6; i++) {
-      const a = i / 6 * TAU;
-      const dx = Math.cos(a) * 1.4, dz = Math.sin(a) * 1.4;
-      this._dbox(b, 2.2, 0.08, 0.7, dx * 0.7, 3.7 - Math.abs(dx) * 0.25, dz * 0.7, 0x3f7d36);
+    // изогнутый ствол (4 сегмента)
+    let px = 0, py = 0;
+    for (let i = 0; i < 4; i++) {
+      const h = 1.05, lean = 0.06 + i * 0.05;
+      this._cyl(b, 0.15 - i * 0.015, h, px + lean * 0.5, py + h / 2, 0, 0x9a7b52, 6);
+      px += lean; py += h;
+    }
+    // листья: 8 «язычков», опущенных к низу
+    const topY = py + 0.1;
+    for (let i = 0; i < 8; i++) {
+      const a = i / 8 * TAU + 0.3;
+      const dx = Math.cos(a), dz = Math.sin(a);
+      const len = 2.1;
+      const midX = px + dx * len * 0.5, midZ = dz * len * 0.5;
+      const midY = topY - 0.35;
+      const ca = Math.cos(a + Math.PI / 2), sa = Math.sin(a + Math.PI / 2);
+      const seg = (x0, z0, x1, z1, y, wdt) => {
+        const len2 = Math.hypot(x1 - x0, z1 - z0);
+        const ang = Math.atan2(x1 - x0, z1 - z0);
+        // параллелограмм листа
+        const nx = -Math.sin(ang) * wdt / 2, nz = Math.cos(ang) * wdt / 2;
+        const cxm = (x0 + x1) / 2, czm = (z0 + z1) / 2;
+        const p = [[cxm + (x1 - x0) * 0.5 - nx, czm + (z1 - z0) * 0.5 - nz],
+                   [cxm + (x1 - x0) * 0.5 + nx, czm + (z1 - z0) * 0.5 + nz],
+                   [cxm - (x1 - x0) * 0.5 + nx, czm - (z1 - z0) * 0.5 + nz],
+                   [cxm - (x1 - x0) * 0.5 - nx, czm - (z1 - z0) * 0.5 - nz]];
+        const push = (X, Z, Y) => { b.pos.push(X, Y, Z); b.norm.push(0, 1, 0); b.uv.push(0, 0); };
+        push(p[0][0], p[0][1], y); push(p[1][0], p[1][1], y); push(p[3][0], p[3][1], y);
+        push(p[0][0], p[0][1], y); push(p[3][0], p[3][1], y); push(p[2][0], p[2][1], y);
+        b.col.push(0.32, 0.52, 0.26, 0.32, 0.52, 0.26, 0.32, 0.52, 0.26, 0.32, 0.52, 0.26, 0.32, 0.52, 0.26, 0.32, 0.52, 0.26);
+      };
+      seg(px, 0, midX, midZ, topY - 0.05, 0.55);
+      seg(midX, midZ, px + dx * len, dz * len, topY - 0.55, 0.4);
     }
     const geo = b.build();
+    geo.userData.shared = true; // одна геометрия на все чанки — не dispose-ить
     this._palmCache = geo;
     return geo;
   },
@@ -700,7 +751,8 @@ const City3D = {
   },
   _disposeGroup(g) {
     g.traverse(o => {
-      if (o.geometry) o.geometry.dispose();
+      // геометрию 3D-моделей не трогаем — она общая (Assets3D.v)
+      if (o.geometry && !o.geometry.userData.shared) o.geometry.dispose();
     });
   },
 
@@ -714,6 +766,8 @@ const City3D = {
     this.buildGround();
     this.buildSigns();
     this.buildIndex();
+    this.buildBuildings();
+    this.buildLandmarks();
   },
 
   render(dt) {

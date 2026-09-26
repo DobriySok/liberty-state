@@ -14,13 +14,23 @@ const Game = {
   saveT: 0,
   remotes: new Map(),
 
-  init() {
+  async init() {
     const canvas = document.getElementById('game');
-    // сначала мир (City3D.init читает World.tiles при сборке земли)
+    // 1) загрузка 3D-ассетов (Kenney CC0) с прогрессом
+    UI.init();
+    UI.loading(0);
+    try {
+      await Assets3D.load(p => UI.loading(p));
+    } catch (e) {
+      console.error('Assets3D: не удалось загрузить модели', e);
+      UI.loadingError();
+      return;
+    }
+    UI.hideLoading();
+    // 2) мир (City3D.init читает World.tiles при сборке земли)
     World.gen(this._seed0());
     City3D.init(canvas);
     HUD.init(document.getElementById('hud'));
-    UI.init();
     Bullets.init();
     City3D.update(World.START.x, World.START.z);
     Player.init(World.START.x, World.START.z);
@@ -323,6 +333,8 @@ const Game = {
         if (!vis.ped) { vis.ped = Meshes.ped(0xe0703f, 0xd8a878, false); City3D.scene.add(vis.ped); }
         vis.ped.position.set(sx, 0, sz);
         vis.ped.rotation.y = sa;
+        Assets3D.setWalk(vis.ped, Math.hypot(sx - (vis.ped._lx || sx), sz - (vis.ped._lz || sz)) / Math.max(dt, 1e-3), dt);
+        vis.ped._lx = sx; vis.ped._lz = sz;
       }
     }
     for (const [id] of this.remotes) if (!Net.remotes.has(id)) this._removeRemoteVis(id);

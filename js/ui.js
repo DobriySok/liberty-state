@@ -3,7 +3,35 @@
 
 const UI = {
   ov: null,
+  _load: null,
   init() { this.ov = document.getElementById('overlay'); this.hide(); },
+
+  /* ---------- экран загрузки 3D-ассетов ---------- */
+  loading(p) {
+    if (!this._load) {
+      this._load = el('div', 'loading');
+      this._load.innerHTML = '<div class="logo">LIBERTY STATE</div>' +
+        '<div class="load-bar"><div class="load-fill"></div></div>' +
+        '<div class="load-txt">Загрузка города…</div>';
+      document.body.appendChild(this._load);
+    }
+    const f = this._load.querySelector('.load-fill');
+    const t = this._load.querySelector('.load-txt');
+    f.style.width = Math.round(p * 100) + '%';
+    t.textContent = p >= 1 ? 'Готово' : 'Загрузка города… ' + Math.round(p * 100) + '%';
+  },
+  hideLoading() {
+    if (!this._load) return;
+    const l = this._load;
+    l.classList.add('done');
+    setTimeout(() => { if (l.parentNode) l.remove(); if (this._load === l) this._load = null; }, 600);
+  },
+  loadingError() {
+    if (!this._load) this.loading(0);
+    const t = this._load.querySelector('.load-txt');
+    t.textContent = 'Не удалось загрузить 3D-модели. Проверь подключение к интернету и обнови страницу (Ctrl+R).';
+    t.style.color = '#ff6b6b';
+  },
 
   show(node) {
     this.ov.innerHTML = '';
@@ -36,7 +64,7 @@ const UI = {
     p.appendChild(this.btn('МУЛЬТИПЛЕЕР (LAN)', '', () => this.net()));
     p.appendChild(this.btn('УПРАВЛЕНИЕ', '', () => this.help()));
     p.appendChild(this.btn('О ИГРЕ', '', () => this.about()));
-    p.appendChild(el('div', 'footer', 'Оригинальный проект: 100% процедурная графика · Three.js (MIT) · WebRTC без сервера<br>Никаких ассетов, названий или кода GTA. Все совпадения с реальными марками случайны.'));
+    p.appendChild(el('div', 'footer', 'Оригинальный проект: 3D-модели Kenney (CC0) + процедурный мир · Three.js (MIT) · WebRTC без сервера<br>Никаких ассетов, названий или кода GTA. Все совпадения с реальными марками случайны.'));
     this.show(p);
   },
 
@@ -93,7 +121,8 @@ const UI = {
       <b>LIBERTY STATE</b> — полностью браузерный open-world экшен с видом от третьего лица.
       <br><br>
       • Всё написано с нуля на чистом JavaScript + Three.js (лицензия MIT).
-      • Графика 100% процедурная: город, машины, здания, текстуры генерируются кодом.
+      • 3D-модели — бесплатные CC0-наборы Kenney (kenney.nl): здания, машины, персонажи, природа.
+      • Мир, дороги, ландшафт и эффекты генерируются кодом детерминированно (сид).
       • Никаких ассетов, музыки, названий и кода из GTA или других игр.
       • Работает без сервера: открой index.html в браузере.
       • Мультиплеер — WebRTC P2P (LAN или интернет), сигналинг копируешь в мессенджер.

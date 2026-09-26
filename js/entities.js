@@ -91,14 +91,9 @@ const Player = {
         this.aimX = ray.x; this.aimZ = ray.z;
         this.angle = Math.atan2(ray.x - this.x, ray.z - this.z);
       }
-      // анимация
-      const u = this.group.userData;
-      u.walkT += dt * this.speed * 1.6;
-      const sw = Math.sin(u.walkT) * 0.55 * clamp(this.speed / 4.4, 0, 1);
-      u.legL.rotation.x = sw; u.legR.rotation.x = -sw;
-      u.armL.rotation.x = -sw * 0.8;
+      // анимация (модельные Idle/Run)
+      Assets3D.setWalk(this.group, this.speed, dt);
       if (this.fireCd <= 0 && Game.mouse.down) this.fire(this.angle, false);
-      else u.armR.rotation.x = lerp(u.armR.rotation.x, 0, 0.2);
       this.fireCd = Math.max(0, this.fireCd - dt);
       this.swingT = Math.max(0, this.swingT - dt);
     }
@@ -387,8 +382,9 @@ class Ped {
       const res = World.collideCircle(this.x, this.z, 0.4);
       if (res.hit) { this.angle += rand(0.6, 2.2) * (Math.random() < 0.5 ? 1 : -1); this.x = res.x; this.z = res.z; }
     }
-    this.group.position.set(this.x, Math.abs(Math.sin(Game.time * 7 + this.id0)) * 0.05, this.z);
+    this.group.position.set(this.x, 0, this.z);
     this.group.rotation.y = this.angle;
+    Assets3D.setWalk(this.group, spd > 0 ? Math.max(spd, 1.5) : 0, dt);
   }
   fleeFrom(x, z) {
     if (this.state === 'dead' || this.rival) return;
