@@ -1,34 +1,37 @@
 'use strict';
-/* ================= WORLD: город из KayKit-деталей (CC0).
-   Дороги — реальные модели road-*, кварталы — реальные здания,
-   земля — фото-текстуры ambientCG. Коллизии — AABB. ================= */
+/* ================= WORLD: город.
+   Дороги — сплошное фото-асфальтовое полотно с разметкой (инстансы),
+   тротуары с бордюрами, здания KayKit (CC0), деревья Kenney (CC0).
+   Никаких «ковриков»: асфальт и тротуары слиты в единые меши. ================= */
 
-const TILE = 4;              // метров между узлами дорожной сетки KayKit
-const LINES = 13;            // линий дорог по каждой оси
-const BLOCK = 3;             // клеток между линиями (размер квартала)
-const CITY = (LINES - 1) * BLOCK * TILE + TILE;  // размер города, м
+const TILE = 4;
+const LINES = 13;
+const BLOCK = 3;
+const P = TILE * BLOCK;              // шаг линий (12 м)
+const ROADW = 6;                     // ширина проезда
+const CITY = (LINES - 1) * P + TILE;
 
 const World = {
   seed: 1,
-  solids: [],      // AABB {x0,z0,x1,z1}
-  spawnPts: [],    // точки на дорогах для трафика
-  timeOfDay: 10.0, // часы
+  solids: [],
+  spawnPts: [],
+  timeOfDay: 10.0,
   sun: null, hemi: null, skyTex: null, skyCtx: null,
 
   gen(seed) {
     this.seed = seed >>> 0 || 1;
     const rng = mulberry32(this.seed);
-    this.solids = []; this.spawnPts = [];
-    if (this.group) { Game.scene.remove(this.group); this._dispose(this.group); }
+    this.solids = []; this.spawnPts = []; this.lampPos = [];
+    if (this.group) { Game.scene.remove(this.group); }
     const G = this.group = new THREE.Group();
     Game.scene.add(G);
 
     this._ground();
     this._roads(rng);
     this._blocks(rng);
+    this._greenery(rng);
     this._lights();
 
-    // свет
     this.hemi = new THREE.HemisphereLight(0xcfe4ff, 0x51584a, 0.75);
     G.add(this.hemi);
     this.sun = new THREE.DirectionalLight(0xffe8c8, 1.15);
@@ -37,124 +40,215 @@ const World = {
     this._sky();
   },
 
-  _dispose(g) { g.traverse(o => { }); },
+  /* PlaneGeometry c UV, растянутыми под тайлинг (одна текстура на всё) */
+  _tiledGeo(w, l, tw, tl) {
+    const g = new THREE.PlaneGeometry(w, l);
+    g.rotateX(-Math.PI / 2);
+    const uv = g.attributes.uv;
+    for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * (w / tw), uv.getY(i) * (l / tl));
+    uv.needsUpdate = true;
+    return g;
+  },
 
-  /* ---- земля: фото-трава ---- */
+  /* ---- земля: фото-трава, тайл 5 м, мягкий тон ---- */
   _ground() {
-    const t = Assets.tex.grass;
-    t.repeat.set(CITY / 14, CITY / 14);
-    const g = new THREE.Mesh(new THREE.PlaneGeometry(CITY * 1.6, CITY * 1.6), new THREE.MeshLambertMaterial({ map: t }));
-    g.rotation.x = -Math.PI / 2; g.position.set(CITY / 2, 0, CITY / 2);
-    this.group.add(g);
+    const mat = new THREE.MeshLambertMaterial({ map: Assets.tex.grass, color: 0xaabf8e });
+    const m = new THREE.Mesh(this._tiledGeo(CITY * 1.7, CITY * 1.7, 5, 5), mat);
+    m.position.set(CITY / 2, 0, CITY / 2);
+    this.group.add(m);
   },
 
-  /* ---- дорожная сетка из моделей KayKit ---- */
+  /* ---- дороги: сплошной асфальт + разметка + тротуары с бордюрами ---- */
   _roads(rng) {
-    const P = TILE * BLOCK;        // шаг линий
-    const list = [];               // {name, x, z, ry}
-    const roadY = 0.02;
-    const cross = (i, j) => list.push({ n: 'road-junction', x: i * P, z: j * P, ry: 0 });
-    const straight = (x, z, vert) => list.push({ n: 'road-straight', x, z, ry: vert ? Math.PI / 2 : 0 });
+    const L = CITY + ROADW;
+    // --- асфальт: 26 полотен, слитых в один меш ---
+    const listA = [];
+    for (let i = 0; i < LINES; i++) {
+      const c = i * P;
+      listA.push({ geo: this._tiledGeo(ROADW, L, 3, 6), matrix: trs(c, 0.02, CITY / 2, 0) });
+      listA.push({ geo: this._tiledGeo(L, ROADW, 3, 6), matrix: trs(CITY / 2, 0.028, c, 0) });
+    }
+    const asphalt = new THREE.Mesh(mergeGeos(listA), new THREE.MeshLambertMaterial({ map: Assets.tex.asphalt }));
+    this.group.add(asphalt);
 
-    for (let j = 0; j < LINES; j++) for (let i = 0; i < LINES; i++) {
-      const x = i * P, z = j * P;
-      cross(i, j);
-      if (i < LINES - 1) for (let k = 1; k <= BLOCK - 1; k++) straight(x + k * TILE, z, false);
-      if (j < LINES - 1) for (let k = 1; k <= BLOCK - 1; k++) straight(x, z + k * TILE, true);
+    // --- разметка: инстансы белых полос (пунктир, края, зебры) ---
+    const marks = [];   // {x, z, w, l}
+    const segA = ROADW / 2 + 2, segB = P - ROADW / 2 - 2;
+    for (let i = 0; i < LINES; i++) {
+      const c = i * P;
+      for (let j = 0; j < LINES - 1; j++) {
+        const z0 = j * P + segA, z1 = (j + 1) * P - segA, sl = z1 - z0;
+        const zm = (z0 + z1) / 2;
+        // края (верт/гориз) + пунктир
+        marks.push({ x: c - (ROADW / 2 - 0.6), z: zm, w: 0.14, l: sl }, { x: c + (ROADW / 2 - 0.6), z: zm, w: 0.14, l: sl });
+        marks.push({ x: zm, z: c - (ROADW / 2 - 0.6), w: sl, l: 0.14 }, { x: zm, z: c + (ROADW / 2 - 0.6), w: sl, l: 0.14 });
+        for (let z = z0 + 1; z < z1 - 1; z += 3.4) marks.push({ x: c, z, w: 0.16, l: 1.6 });
+        for (let x = z0 + 1; x < z1 - 1; x += 3.4) marks.push({ x, z: c, w: 1.6, l: 0.16 });
+      }
+      // зебры вокруг перекрёстков
+      for (let j = 0; j < LINES; j++) {
+        const n = { x: c, z: j * P };
+        for (let s = 0; s < 6; s++) {
+          const o = -2.2 + s * 0.75;
+          marks.push({ x: n.x + o, z: n.z - ROADW / 2 - 0.9, w: 0.5, l: 2.1 });
+          marks.push({ x: n.x + o, z: n.z + ROADW / 2 + 0.9, w: 0.5, l: 2.1 });
+          marks.push({ x: n.x - ROADW / 2 - 0.9, z: n.z + o, w: 2.1, l: 0.5 });
+          marks.push({ x: n.x + ROADW / 2 + 0.9, z: n.z + o, w: 2.1, l: 0.5 });
+        }
+      }
     }
-    const g = new THREE.Group();
-    // дорогам KayKit слегка возвращаем асфальтовую серость (атлас у них палёвый)
-    const roadTint = new THREE.MeshLambertMaterial({ map: Assets.cityMat.map, color: 0x9aa0a8 });
-    for (const it of list) {
-      const m = Assets.mesh(it.n, it.n.startsWith('road') ? roadTint : Assets.cityMat);
-      m.position.set(it.x, roadY, it.z); m.rotation.y = it.ry;
-      g.add(m);
-      this.spawnPts.push({ x: it.x, z: it.z });
+    const mgeo = new THREE.PlaneGeometry(1, 1); mgeo.rotateX(-Math.PI / 2);
+    const im = new THREE.InstancedMesh(mgeo, new THREE.MeshBasicMaterial({ color: 0xd6d7cf }), marks.length);
+    const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), S = new THREE.Vector3(), V = new THREE.Vector3();
+    marks.forEach((mk, i) => {
+      V.set(mk.x, 0.045, mk.z); S.set(mk.w, 1, mk.l);
+      M.compose(V, Q, S); im.setMatrixAt(i, M);
+    });
+    im.instanceMatrix.needsUpdate = true;
+    this.group.add(im);
+
+    // --- тротуары с бордюрами: слиты в один меш ---
+    const listS = [];
+    const SW = 1.8;
+    for (let i = 0; i < LINES; i++) {
+      const c = i * P;
+      for (let j = 0; j < LINES - 1; j++) {
+        const z0 = j * P + ROADW / 2, z1 = (j + 1) * P - ROADW / 2, sl = z1 - z0, zm = (z0 + z1) / 2;
+        listS.push({ geo: this._tiledGeo(SW, sl, 2.5, 2.5), matrix: trs(c - ROADW / 2 - SW / 2, 0.06, zm, 0) });
+        listS.push({ geo: this._tiledGeo(SW, sl, 2.5, 2.5), matrix: trs(c + ROADW / 2 + SW / 2, 0.06, zm, 0) });
+        listS.push({ geo: this._tiledGeo(sl, SW, 2.5, 2.5), matrix: trs(zm, 0.06, c - ROADW / 2 - SW / 2, 0) });
+        listS.push({ geo: this._tiledGeo(sl, SW, 2.5, 2.5), matrix: trs(zm, 0.06, c + ROADW / 2 + SW / 2, 0) });
+      }
     }
-    this.group.add(g);
+    this.concMat = new THREE.MeshLambertMaterial({ map: Assets.tex.concrete });
+    this.group.add(new THREE.Mesh(mergeGeos(listS), this.concMat));
+
+    // точки спавна на дороге
+    for (let i = 0; i < LINES; i++) for (let j = 0; j < LINES; j++)
+      this.spawnPts.push({ x: i * P, z: j * P });
   },
 
-  /* ---- кварталы: здания KayKit + пропсы, AABB-коллизии ---- */
+  /* ---- кварталы: здания KayKit плотнее, дворы с бетоном ---- */
   _blocks(rng) {
-    const P = TILE * BLOCK;
     const bp = new THREE.Group();
     const bDefs = ['building-A','building-B','building-C','building-D','building-E','building-F','building-G','building-H'];
-    const deco = ['bench', 'dumpster', 'firehydrant', 'bush'];
-    const tConc = Assets.tex.concrete; tConc.repeat.set(2, 2);
+    const deco = ['firehydrant', 'dumpster', 'bench'];
+    const BS = 3.0;                      // масштаб зданий (2м-модель -> 6 м)
+    const mid = (bi, bj) => Math.abs(bi - (LINES - 1) / 2) < 2.6 && Math.abs(bj - (LINES - 1) / 2) < 2.6;
+
+    const place = (name, x, z, ry, tiers, scale) => {
+      const s = Assets.size[name];
+      const m = Assets.mesh(name, tiers > 1 ? Assets.bMat : Assets.cityMat);
+      m.scale.setScalar(scale);
+      m.position.set(x, 0, z); m.rotation.y = ry;
+      bp.add(m);
+      const rot = Math.abs(Math.sin(ry)) > 0.5;
+      const hw = (rot ? s.z : s.x) * scale / 2, hd = (rot ? s.x : s.z) * scale / 2;
+      this.solids.push({ x0: x - hw, z0: z - hd, x1: x + hw, z1: z + hd });
+      for (let t = 1; t < tiers; t++) {
+        const m2 = Assets.mesh(name, Assets.bMat);
+        m2.scale.setScalar(scale);
+        m2.position.set(x, s.y * scale * t - 0.03, z); m2.rotation.y = ry;
+        bp.add(m2);
+      }
+      return s.y * scale * tiers;
+    };
 
     for (let bj = 0; bj < LINES - 1; bj++) for (let bi = 0; bi < LINES - 1; bi++) {
-      const x0 = bi * P + TILE, z0 = bj * P + TILE;   // внутренняя область квартала
-      const cx = x0 + (P - TILE) / 2, cz = z0 + (P - TILE) / 2;
+      const x0 = bi * P + ROADW / 2 + 1.2, z0 = bj * P + ROADW / 2 + 1.2;
+      const iw = P - ROADW - 2.4;                    // внутренний размер квартала (~3.6м? нет: 12-6-2.4=3.6)
+      const cx = bi * P + P / 2, cz = bj * P + P / 2;
       const kind = rng();
-      if (kind < 0.12) { // парк:Concrete-дорожка, кусты, лавки, водонапорка в центре карты
-        const bushN = 3 + (rng() * 4 | 0);
-        for (let k = 0; k < bushN; k++) {
-          const m = Assets.mesh('bush');
-          m.position.set(x0 + rng() * (P - TILE), 0, z0 + rng() * (P - TILE));
-          const s = 0.8 + rng() * 0.6; m.scale.setScalar(s);
-          bp.add(m);
+
+      if (kind < 0.14) {                             // парк
+        const n = 4 + (rng() * 4 | 0);
+        for (let k = 0; k < n; k++) {
+          const t = Assets.mesh(rng() < 0.6 ? 'tree-large' : 'tree-small', Assets.treeMat);
+          t.scale.setScalar(rand(0.8, 1.25));
+          t.position.set(cx + rand(-iw / 2, iw / 2) - 0, 0, cz + rand(-iw / 2, iw / 2));
+          bp.add(t);
         }
-        if (rng() < 0.4) { const w = Assets.mesh('watertower'); w.position.set(cx, 0, cz); bp.add(w); this._aabbModel(w); }
-        for (let k = 0; k < 2; k++) { const b = Assets.mesh('bench'); b.position.set(cx + (k ? 3 : -3), 0, cz); b.rotation.y = rng() * 6.28; bp.add(b); }
+        for (let k = 0; k < 2; k++) {
+          const b = Assets.mesh('bench'); b.scale.setScalar(2.2);
+          b.position.set(cx + (k ? 2.4 : -2.4), 0, cz); b.rotation.y = k ? 0 : Math.PI;
+          bp.add(b);
+        }
+        if (rng() < 0.35) { const w = Assets.mesh('watertower'); w.scale.setScalar(2.6); w.position.set(cx, 0, cz); bp.add(w); }
         continue;
       }
-      // бетонная площадка квартала
-      const pad = new THREE.Mesh(new THREE.PlaneGeometry(P - TILE + 1.2, P - TILE + 1.2), new THREE.MeshLambertMaterial({ map: tConc.clone() }));
-      pad.material.map.needsUpdate = true; pad.material.map.repeat.set(3, 3);
-      pad.rotation.x = -Math.PI / 2; pad.position.set(cx, 0.015, cz);
+
+      // двор: бетонная площадка
+      const pad = new THREE.Mesh(this._tiledGeo(P - ROADW / 2 - 1, P - ROADW / 2 - 1, 2.5, 2.5), this.concMat);
+      pad.position.set(cx, 0.045, cz);
       bp.add(pad);
 
-      // здания: 1 крупный или 2 поменьше; «башня» — ярусы реальных моделей
-      // KayKit-мини-масштаб: здание 2x2x1.65 -> масштаб BS приводит к городским габаритам
-      const BS = 2.2;
-      const mid = Math.abs(bi - (LINES - 1) / 2) < 2.5 && Math.abs(bj - (LINES - 1) / 2) < 2.5; // центр — высотки
-      const place = (name, x, z, ry, tier2) => {
-        const m = Assets.mesh(name, tier2 ? Assets.bMat : Assets.cityMat);
-        const s = Assets.size[name];
-        m.scale.setScalar(BS);
-        m.position.set(x, 0, z); m.rotation.y = ry;
-        bp.add(m);
-        const hw = (ry % Math.PI === 0 ? s.x : s.z) * BS / 2, hd = (ry % Math.PI === 0 ? s.z : s.x) * BS / 2;
-        this.solids.push({ x0: x - hw, z0: z - hd, x1: x + hw, z1: z + hd });
-        if (tier2) { // ярусы сверху
-          const m2 = Assets.mesh(name, Assets.bMat);
-          m2.scale.setScalar(BS);
-          m2.position.set(x, s.y * BS - 0.02, z); m2.rotation.y = ry; bp.add(m2);
-          if (mid && rng() < 0.5) { const m3 = Assets.mesh(name, Assets.bMat); m3.scale.setScalar(BS); m3.position.set(x, s.y * 2 * BS - 0.04, z); m3.rotation.y = ry; bp.add(m3); }
-        }
-      };
-      const big = mid || rng() < 0.45;
-      if (big) place(pick(bDefs), cx, cz, (rng() * 4 | 0) * Math.PI / 2, true);
-      else {
-        place(pick(bDefs), cx - 3.4, cz - 3.2, (rng() * 4 | 0) * Math.PI / 2, false);
-        place(pick(bDefs), cx + 3.4, cz + 3.2, (rng() * 4 | 0) * Math.PI / 2, false);
+      const rot = () => (rng() * 4 | 0) * Math.PI / 2;
+      const big = mid(bi, bj);
+      if (big) {
+        place(pick(bDefs), cx, cz, rot(), 3, BS);
+        place(pick(bDefs), cx - 5.2, cz + 5.2, rot(), 1, BS * 0.8);
+        place(pick(bDefs), cx + 5.2, cz - 5.2, rot(), 1, BS * 0.8);
+      } else {
+        place(pick(bDefs), cx - 5.2, cz - 5.2, rot(), 1, BS);
+        place(pick(bDefs), cx + 5.2, cz + 5.2, rot(), 1, BS);
+        if (rng() < 0.5) place(pick(bDefs), cx + 5.2, cz - 5.2, rot(), 2, BS * 0.85);
+        if (rng() < 0.5) place(pick(bDefs), cx - 5.2, cz + 5.2, rot(), 1, BS * 0.85);
       }
-      // декор по углам
+      // декор у тротуара
       for (let k = 0; k < 2; k++) {
         const d = Assets.mesh(pick(deco));
-        d.scale.setScalar(1.7);
-        d.position.set(x0 + rng() * (P - TILE), 0, z0 + rng() * (P - TILE));
-        d.rotation.y = rng() * 6.28; bp.add(d);
+        d.scale.setScalar(1.8);
+        d.position.set(x0 + rng() * iw, 0.06, z0 + rng() * iw);
+        d.rotation.y = rng() * 6.28;
+        bp.add(d);
       }
     }
     this.group.add(bp);
   },
 
-  _aabbModel(m) {
-    const s = Assets.size[m.userData.geoName];
-    this.solids.push({ x0: m.position.x - s.x / 2, z0: m.position.z - s.z / 2, x1: m.position.x + s.x / 2, z1: m.position.z + s.z / 2 });
+  /* ---- зелень: деревья вдоль тротуаров ---- */
+  _greenery(rng) {
+    const g = new THREE.Group();
+    const off = ROADW / 2 + 1.1;
+    for (let i = 0; i < LINES; i++) {
+      const c = i * P;
+      for (let j = 0; j < LINES - 1; j++) {
+        for (let t = 0; t < 2; t++) {
+          const z = j * P + ROADW / 2 + 3 + t * (P - ROADW - 6) / 1;
+          if (rng() < 0.45) continue;
+          const side = rng() < 0.5 ? -1 : 1;
+          const name = rng() < 0.6 ? 'tree-large' : 'tree-small';
+          const tree = Assets.mesh(name, Assets.treeMat);
+          const target = name === 'tree-large' ? rand(6.5, 8.5) : rand(4, 5.2);
+          tree.scale.setScalar(target / Assets.size[name].y);
+          tree.position.set(c + side * off, 0.05, z + rand(-1.5, 1.5));
+          tree.rotation.y = rng() * 6.28;
+          g.add(tree);
+          // поперёк
+          if (rng() < 0.5) {
+            const t2 = Assets.mesh(rng() < 0.6 ? 'tree-large' : 'tree-small', Assets.treeMat);
+            t2.scale.setScalar((rng() < 0.6 ? rand(6.5, 8.5) : rand(4, 5.2)) / Assets.size[name].y);
+            t2.position.set(z + rand(-1.5, 1.5), 0.05, c + side * off);
+            t2.rotation.y = rng() * 6.28;
+            g.add(t2);
+          }
+        }
+      }
+    }
+    this.group.add(g);
   },
 
-  /* ---- фонари вдоль дорог (модели KayKit) ---- */
+  /* ---- фонари вдоль дорог ---- */
   _lights() {
-    const P = TILE * BLOCK, g = new THREE.Group();
+    const g = new THREE.Group();
     for (let j = 0; j < LINES; j++) for (let i = 0; i < LINES - 1; i++) {
       if ((i + j) % 2) continue;
       const m = Assets.mesh('streetlight');
-      m.position.set(i * P + TILE * 1.5, 0, j * P + 2.6);
+      m.scale.setScalar(3.4);
+      m.position.set(i * P + P / 2, 0.05, j * P + ROADW / 2 + 0.9);
       m.rotation.y = Math.PI;
       g.add(m);
-      this.lampPos = this.lampPos || []; this.lampPos.push({ x: m.position.x, z: m.position.z });
+      this.lampPos.push({ x: m.position.x, z: m.position.z });
     }
     this.group.add(g);
   },
@@ -181,7 +275,6 @@ const World = {
     return [0x3f7ec4, 0x8db8e2, 0xcfe2ee];
   },
 
-  /* ---- небо: canvas-градиент, перекрашивается временем суток ---- */
   _sky() {
     const c = document.createElement('canvas'); c.width = 2; c.height = 256;
     this.skyCtx = c.getContext('2d');
@@ -189,6 +282,7 @@ const World = {
     this.skyTex.encoding = THREE.sRGBEncoding;
     Game.scene.background = this.skyTex;
     Game.scene.fog = new THREE.Fog(0xcfe2ee, 90, 420);
+    this.updateSky();
   },
 
   updateSky() {
@@ -199,7 +293,7 @@ const World = {
     g.addColorStop(1, '#' + stops[2].toString(16).padStart(6, '0'));
     x.fillStyle = g; x.fillRect(0, 0, 2, 256);
     this.skyTex.needsUpdate = true;
-    const night = clamp((this.timeOfDay < 6.5 || this.timeOfDay > 19.5) ? 1 : 0, 0, 1);
+    const night = (this.timeOfDay < 6.5 || this.timeOfDay > 19.5) ? 1 : 0;
     const dusk = (this.timeOfDay > 18 && this.timeOfDay < 20) || (this.timeOfDay > 5.5 && this.timeOfDay < 7.5);
     this.sun.intensity = night ? 0.12 : (dusk ? 0.7 : 1.1);
     this.hemi.intensity = night ? 0.32 : 0.75;
@@ -207,7 +301,6 @@ const World = {
     if (Assets.bMat) Assets.bMat.emissiveIntensity = night ? 0.85 : (dusk ? 0.35 : 0);
   },
 
-  /* ---- коллизии: окружность против AABB ---- */
   collide(x, z, r) {
     let hit = false;
     for (const s of this.solids) {
@@ -216,7 +309,7 @@ const World = {
       if (d2 < r * r) {
         hit = true;
         if (d2 > 1e-6) { const d = Math.sqrt(d2), push = (r - d) / d; x += dx * push; z += dz * push; }
-        else { // центр внутри — выталкиваем к ближайшей грани
+        else {
           const l = x - s.x0, rr = s.x1 - x, t = z - s.z0, b = s.z1 - z;
           const m = Math.min(l, rr, t, b);
           if (m === l) x = s.x0 - r; else if (m === rr) x = s.x1 + r; else if (m === t) z = s.z0 - r; else z = s.z1 + r;

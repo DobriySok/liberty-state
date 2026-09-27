@@ -27,7 +27,7 @@ const HUD = {
     const sc = 0.42, cxm = mx + MS / 2, cym = my + MS / 2;
     x.fillStyle = '#20351c'; x.fillRect(mx, my, MS, MS);
     // дороги
-    x.strokeStyle = '#5a6068'; x.lineWidth = 3;
+    x.strokeStyle = '#9aa2ac'; x.lineWidth = 4;
     const P = TILE * BLOCK;
     for (let i = 0; i < LINES; i++) {
       const px = cxm + (i * P - pl.x) * sc, pz = cym + (i * P - pl.z) * sc;

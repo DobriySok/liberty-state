@@ -210,7 +210,13 @@ const Game = {
     const cz = tz - Math.cos(yaw) * Math.cos(pl.pitch) * dist;
     const cy = h + Math.sin(pl.pitch) * dist;
     const k = 1 - Math.exp(-9 * dt);
-    C.position.lerp(new THREE.Vector3(cx, cy, cz), k);
+    // анти-клип: если позиция внутри здания — придвигаем камеру к цели
+    let cx2 = cx, cz2 = cz, cy2 = cy;
+    for (let s = 0; s < 8 && World.solidAt(cx2, cz2); s++) {
+      cx2 = tx + (cx2 - tx) * 0.72; cz2 = tz + (cz2 - tz) * 0.72;
+      cy2 = Math.max(1.2, cy2 * 0.82);
+    }
+    C.position.lerp(new THREE.Vector3(cx2, cy2, cz2), k);
     const sh = this.camShakeV * 0.25;
     this.camShakeV = Math.max(0, this.camShakeV - dt * 2.5);
     C.position.x += rand(-sh, sh); C.position.y += rand(-sh, sh);

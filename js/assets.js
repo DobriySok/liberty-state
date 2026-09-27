@@ -30,10 +30,9 @@ const Assets = {
     jobs.push(tex('assets/tex/concrete.jpg', true).then(t => this.tex.concrete = t));
     jobs.push(tex('assets/tex/asphalt.jpg', true).then(t => this.tex.asphalt = t));
 
-    // KayKit GLB -> merged geometry per file
+    // KayKit GLB -> merged geometry per file (дороги больше не нужны — свой асфальт)
     const names = ['building-A','building-B','building-C','building-D','building-E','building-F','building-G','building-H',
-      'bench','bush','dumpster','firehydrant','streetlight','trafficlight-A','watertower',
-      'road-straight','road-corner','road-junction','road-tsplit','road-straight-crossing',
+      'bench','bush','dumpster','firehydrant','streetlight','watertower',
       'car-sedan','car-taxi','car-police','car-hatchback','car-stationwagon'];
     const loader = new THREE.GLTFLoader();
     for (const n of names) {
@@ -47,6 +46,27 @@ const Assets = {
         this.geo[n] = merged; this.size[n] = s;
       }));
     }
+
+    // деревья Kenney: у них своя палитра (assets/trees/Textures/colormap.png) —
+    // сохраняем РОДНОЙ материал из загрузчика
+    jobs.push(add(loader.loadAsync('assets/trees/tree-large.glb').then(g => {
+      const list = [];
+      g.scene.updateMatrixWorld(true);
+      g.scene.traverse(o => { if (o.isMesh && o.geometry) { list.push({ geo: o.geometry, matrix: o.matrixWorld }); if (!this.treeMat) this.treeMat = o.material; } });
+      const merged = mergeGeos(list);
+      merged.computeBoundingBox();
+      const s = new THREE.Vector3(); merged.boundingBox.getSize(s);
+      this.geo['tree-large'] = merged; this.size['tree-large'] = s;
+    })));
+    jobs.push(add(loader.loadAsync('assets/trees/tree-small.glb').then(g => {
+      const list = [];
+      g.scene.updateMatrixWorld(true);
+      g.scene.traverse(o => { if (o.isMesh && o.geometry) list.push({ geo: o.geometry, matrix: o.matrixWorld }); });
+      const merged = mergeGeos(list);
+      merged.computeBoundingBox();
+      const s = new THREE.Vector3(); merged.boundingBox.getSize(s);
+      this.geo['tree-small'] = merged; this.size['tree-small'] = s;
+    })));
 
     // город: два материала — обычный и «ночные окна» (emissive по атласу)
     // GLB-атлас: flipY=false (как у всех glTF), иначе семпллинг зеркалится
