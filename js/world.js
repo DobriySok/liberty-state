@@ -1,360 +1,234 @@
 'use strict';
-/* ================= МИР: карта, тайлы, граф дорог, POI =================
-   Все данные процедурные и детерминированные (сид).
-   Единицы: 1 тайл = 4 метра. Мир 128x128 тайлов = 512x512 м. */
+/* ================= WORLD: город из KayKit-деталей (CC0).
+   Дороги — реальные модели road-*, кварталы — реальные здания,
+   земля — фото-текстуры ambientCG. Коллизии — AABB. ================= */
 
-const TILE = 4;
-const MAPW = 128, MAPH = 128;
-const WORLD_M = MAPW * TILE;
-
-const T = {
-  WATER: 0, SAND: 1, ROAD: 2, SIDEWALK: 3, GRASS: 4,
-  BUILDING: 5, RUNWAY: 6, PAVEMENT: 7, LOT: 8, PARK: 9
-};
-const SOLID_T = { 0: 1, 5: 1 }; // вода и здания непроходимы
-
-const LINES = [14, 30, 46, 62, 78, 94, 110]; // центральные линии улиц (каждая 2 тайла шириной)
-const RUNWAY = { x0: 70, x1: 122, y0: 5, y1: 10 };
-const HELIPAD = { x: 75, y: 6 }; // в тайлах
+const TILE = 4;              // метров между узлами дорожной сетки KayKit
+const LINES = 13;            // линий дорог по каждой оси
+const BLOCK = 3;             // клеток между линиями (размер квартала)
+const CITY = (LINES - 1) * BLOCK * TILE + TILE;  // размер города, м
 
 const World = {
-  seed: 0,
-  rng: null,
-  tiles: null,
-  buildings: [],  // {x0,y0,w,h, ht, facade, roof, tint, poi}
-  trees: [],      // {x, z, kind}  (метры)
-  props: [],      // {x, z, kind}  (метры)
-  pois: [],       // {x, z, w, h, type, doorX, doorZ}  (метры)
-  nodes: [],      // узлы графа дорог {x, z, i, adj:[]}
-  minimap: null,  // canvas 128x128 для HUD
-  aabbs: [],      // AABB зданий для камеры
-  START: { x: 75 * TILE, z: 105 * TILE },
+  seed: 1,
+  solids: [],      // AABB {x0,z0,x1,z1}
+  spawnPts: [],    // точки на дорогах для трафика
+  timeOfDay: 10.0, // часы
+  sun: null, hemi: null, skyTex: null, skyCtx: null,
 
   gen(seed) {
-    this.seed = seed;
-    const rng = mulberry32(seed);
-    // детерминированный randi (тень глобального!) — критично для мультиплеера
-    const randi = (a, b) => a + Math.floor(rng() * (b - a + 1));
-    this.rng = rng;
-    const W = this;
-    W.tiles = new Uint8Array(MAPW * MAPH).fill(T.GRASS);
-    W.buildings = []; W.trees = []; W.props = []; W.pois = []; W.aabbs = [];
+    this.seed = seed >>> 0 || 1;
+    const rng = mulberry32(this.seed);
+    this.solids = []; this.spawnPts = [];
+    if (this.group) { Game.scene.remove(this.group); this._dispose(this.group); }
+    const G = this.group = new THREE.Group();
+    Game.scene.add(G);
 
-    const set = (x, y, t) => {
-      if (x < 0 || y < 0 || x >= MAPW || y >= MAPH) return;
-      W.tiles[y * MAPW + x] = t;
-    };
-    const get = (x, y) => (x < 0 || y < 0 || x >= MAPW || y >= MAPH) ? T.WATER : W.tiles[y * MAPW + x];
+    this._ground();
+    this._roads(rng);
+    this._blocks(rng);
+    this._lights();
 
-    // --- граница: вода (2), песок (1) ---
-    for (let x = 0; x < MAPW; x++) { set(x, 0, T.WATER); set(x, 1, T.WATER); set(x, 2, T.SAND); set(x, 125, T.SAND); set(x, 126, T.WATER); set(x, 127, T.WATER); }
-    for (let y = 3; y < 125; y++) { set(0, y, T.WATER); set(1, y, T.WATER); set(2, y, T.SAND); set(125, y, T.SAND); set(126, y, T.WATER); set(127, y, T.WATER); }
+    // свет
+    this.hemi = new THREE.HemisphereLight(0xcfe4ff, 0x51584a, 0.75);
+    G.add(this.hemi);
+    this.sun = new THREE.DirectionalLight(0xffe8c8, 1.15);
+    this.sun.position.set(120, 180, 60);
+    G.add(this.sun);
+    this._sky();
+  },
 
-    // --- дороги ---
-    for (const L of LINES) {
-      for (let x = 3; x < 125; x++) { set(x, L, T.ROAD); set(x, L + 1, T.ROAD); }
-      for (let y = 3; y < 125; y++) { set(L, y, T.ROAD); set(L + 1, y, T.ROAD); }
+  _dispose(g) { g.traverse(o => { }); },
+
+  /* ---- земля: фото-трава ---- */
+  _ground() {
+    const t = Assets.tex.grass;
+    t.repeat.set(CITY / 14, CITY / 14);
+    const g = new THREE.Mesh(new THREE.PlaneGeometry(CITY * 1.6, CITY * 1.6), new THREE.MeshLambertMaterial({ map: t }));
+    g.rotation.x = -Math.PI / 2; g.position.set(CITY / 2, 0, CITY / 2);
+    this.group.add(g);
+  },
+
+  /* ---- дорожная сетка из моделей KayKit ---- */
+  _roads(rng) {
+    const P = TILE * BLOCK;        // шаг линий
+    const list = [];               // {name, x, z, ry}
+    const roadY = 0.02;
+    const cross = (i, j) => list.push({ n: 'road-junction', x: i * P, z: j * P, ry: 0 });
+    const straight = (x, z, vert) => list.push({ n: 'road-straight', x, z, ry: vert ? Math.PI / 2 : 0 });
+
+    for (let j = 0; j < LINES; j++) for (let i = 0; i < LINES; i++) {
+      const x = i * P, z = j * P;
+      cross(i, j);
+      if (i < LINES - 1) for (let k = 1; k <= BLOCK - 1; k++) straight(x + k * TILE, z, false);
+      if (j < LINES - 1) for (let k = 1; k <= BLOCK - 1; k++) straight(x, z + k * TILE, true);
     }
-    // тротуары: кольцо вокруг дорог
-    const mark = [];
-    for (let y = 3; y < 125; y++) for (let x = 3; x < 125; x++) {
-      if (get(x, y) !== T.ROAD) continue;
-      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const nx = x + dx, ny = y + dy;
-        const t = get(nx, ny);
-        if (t !== T.ROAD && t !== T.WATER && t !== T.SAND) mark.push([nx, ny]);
+    const g = new THREE.Group();
+    // дорогам KayKit слегка возвращаем асфальтовую серость (атлас у них палёвый)
+    const roadTint = new THREE.MeshLambertMaterial({ map: Assets.cityMat.map, color: 0x9aa0a8 });
+    for (const it of list) {
+      const m = Assets.mesh(it.n, it.n.startsWith('road') ? roadTint : Assets.cityMat);
+      m.position.set(it.x, roadY, it.z); m.rotation.y = it.ry;
+      g.add(m);
+      this.spawnPts.push({ x: it.x, z: it.z });
+    }
+    this.group.add(g);
+  },
+
+  /* ---- кварталы: здания KayKit + пропсы, AABB-коллизии ---- */
+  _blocks(rng) {
+    const P = TILE * BLOCK;
+    const bp = new THREE.Group();
+    const bDefs = ['building-A','building-B','building-C','building-D','building-E','building-F','building-G','building-H'];
+    const deco = ['bench', 'dumpster', 'firehydrant', 'bush'];
+    const tConc = Assets.tex.concrete; tConc.repeat.set(2, 2);
+
+    for (let bj = 0; bj < LINES - 1; bj++) for (let bi = 0; bi < LINES - 1; bi++) {
+      const x0 = bi * P + TILE, z0 = bj * P + TILE;   // внутренняя область квартала
+      const cx = x0 + (P - TILE) / 2, cz = z0 + (P - TILE) / 2;
+      const kind = rng();
+      if (kind < 0.12) { // парк:Concrete-дорожка, кусты, лавки, водонапорка в центре карты
+        const bushN = 3 + (rng() * 4 | 0);
+        for (let k = 0; k < bushN; k++) {
+          const m = Assets.mesh('bush');
+          m.position.set(x0 + rng() * (P - TILE), 0, z0 + rng() * (P - TILE));
+          const s = 0.8 + rng() * 0.6; m.scale.setScalar(s);
+          bp.add(m);
+        }
+        if (rng() < 0.4) { const w = Assets.mesh('watertower'); w.position.set(cx, 0, cz); bp.add(w); this._aabbModel(w); }
+        for (let k = 0; k < 2; k++) { const b = Assets.mesh('bench'); b.position.set(cx + (k ? 3 : -3), 0, cz); b.rotation.y = rng() * 6.28; bp.add(b); }
+        continue;
+      }
+      // бетонная площадка квартала
+      const pad = new THREE.Mesh(new THREE.PlaneGeometry(P - TILE + 1.2, P - TILE + 1.2), new THREE.MeshLambertMaterial({ map: tConc.clone() }));
+      pad.material.map.needsUpdate = true; pad.material.map.repeat.set(3, 3);
+      pad.rotation.x = -Math.PI / 2; pad.position.set(cx, 0.015, cz);
+      bp.add(pad);
+
+      // здания: 1 крупный или 2 поменьше; «башня» — ярусы реальных моделей
+      // KayKit-мини-масштаб: здание 2x2x1.65 -> масштаб BS приводит к городским габаритам
+      const BS = 2.2;
+      const mid = Math.abs(bi - (LINES - 1) / 2) < 2.5 && Math.abs(bj - (LINES - 1) / 2) < 2.5; // центр — высотки
+      const place = (name, x, z, ry, tier2) => {
+        const m = Assets.mesh(name, tier2 ? Assets.bMat : Assets.cityMat);
+        const s = Assets.size[name];
+        m.scale.setScalar(BS);
+        m.position.set(x, 0, z); m.rotation.y = ry;
+        bp.add(m);
+        const hw = (ry % Math.PI === 0 ? s.x : s.z) * BS / 2, hd = (ry % Math.PI === 0 ? s.z : s.x) * BS / 2;
+        this.solids.push({ x0: x - hw, z0: z - hd, x1: x + hw, z1: z + hd });
+        if (tier2) { // ярусы сверху
+          const m2 = Assets.mesh(name, Assets.bMat);
+          m2.scale.setScalar(BS);
+          m2.position.set(x, s.y * BS - 0.02, z); m2.rotation.y = ry; bp.add(m2);
+          if (mid && rng() < 0.5) { const m3 = Assets.mesh(name, Assets.bMat); m3.scale.setScalar(BS); m3.position.set(x, s.y * 2 * BS - 0.04, z); m3.rotation.y = ry; bp.add(m3); }
+        }
+      };
+      const big = mid || rng() < 0.45;
+      if (big) place(pick(bDefs), cx, cz, (rng() * 4 | 0) * Math.PI / 2, true);
+      else {
+        place(pick(bDefs), cx - 3.4, cz - 3.2, (rng() * 4 | 0) * Math.PI / 2, false);
+        place(pick(bDefs), cx + 3.4, cz + 3.2, (rng() * 4 | 0) * Math.PI / 2, false);
+      }
+      // декор по углам
+      for (let k = 0; k < 2; k++) {
+        const d = Assets.mesh(pick(deco));
+        d.scale.setScalar(1.7);
+        d.position.set(x0 + rng() * (P - TILE), 0, z0 + rng() * (P - TILE));
+        d.rotation.y = rng() * 6.28; bp.add(d);
       }
     }
-    for (const [x, y] of mark) if (get(x, y) !== T.ROAD && get(x, y) !== T.WATER && get(x, y) !== T.SAND) set(x, y, T.SIDEWALK);
+    this.group.add(bp);
+  },
 
-    // --- ВПП ---
-    for (let y = RUNWAY.y0; y <= RUNWAY.y1; y++)
-      for (let x = RUNWAY.x0; x <= RUNWAY.x1; x++)
-        if (get(x, y) !== T.ROAD) set(x, y, T.RUNWAY);
+  _aabbModel(m) {
+    const s = Assets.size[m.userData.geoName];
+    this.solids.push({ x0: m.position.x - s.x / 2, z0: m.position.z - s.z / 2, x1: m.position.x + s.x / 2, z1: m.position.z + s.z / 2 });
+  },
 
-    /* --- расчёт «естественной» высоты: модель масштабируется под габарит квартала,
-          высота = высота модели * sxz (без неестественного растяжения) --- */
-    const natH = (varId, w, h, margin) => {
-      const v = Assets3D.v[varId];
-      if (!v) return 8;
-      const sxz = Math.min((w * TILE) / v.bb.w, (h * TILE) / v.bb.d) * margin;
-      return Math.max(4, v.bb.h * sxz);
-    };
+  /* ---- фонари вдоль дорог (модели KayKit) ---- */
+  _lights() {
+    const P = TILE * BLOCK, g = new THREE.Group();
+    for (let j = 0; j < LINES; j++) for (let i = 0; i < LINES - 1; i++) {
+      if ((i + j) % 2) continue;
+      const m = Assets.mesh('streetlight');
+      m.position.set(i * P + TILE * 1.5, 0, j * P + 2.6);
+      m.rotation.y = Math.PI;
+      g.add(m);
+      this.lampPos = this.lampPos || []; this.lampPos.push({ x: m.position.x, z: m.position.z });
+    }
+    this.group.add(g);
+  },
 
-    // --- POI (построим первыми, чтобы случайные здания не мешали) ---
-    const POI_DEFS = [
-      { x0: 50, y0: 50, w: 6, h: 4, type: 'hospital', var: 'commercial/building-n' },
-      { x0: 86, y0: 50, w: 5, h: 4, type: 'police', var: 'commercial/building-k' },
-      { x0: 52, y0: 68, w: 4, h: 3, type: 'shop', var: 'commercial/building-c' },
-      { x0: 88, y0: 68, w: 4, h: 3, type: 'shop', var: 'commercial/building-j' },
-      { x0: 68, y0: 100, w: 5, h: 3, type: 'garage', var: 'industrial/building-f' },
-      { x0: 54, y0: 102, w: 3, h: 3, type: 'cafe', var: 'commercial/building-d' }
+  _skyStops(day) {
+    const keys = [
+      [0, [0x0a1226, 0x101c38, 0x1a2a4a]], [5, [0x0a1226, 0x1c2a4e, 0x3a4a6e]],
+      [6.5, [0x31508c, 0xc46a3a, 0xf0b26a]], [9, [0x3f7ec4, 0x8db8e2, 0xcfe2ee]],
+      [16, [0x3f7ec4, 0x8db8e2, 0xd8e4ea]], [19, [0x4a5ea0, 0xd07a40, 0xf2b968]],
+      [20.5, [0x182448, 0x2a3a62, 0x4a4a6e]], [24, [0x0a1226, 0x101c38, 0x1a2a4a]]
     ];
-    for (const p of POI_DEFS) {
-      for (let y = p.y0; y < p.y0 + p.h; y++) for (let x = p.x0; x < p.x0 + p.w; x++) set(x, y, T.BUILDING);
-      const ht = natH(p.var, p.w, p.h, 0.95);
-      W.buildings.push({ x0: p.x0, y0: p.y0, w: p.w, h: p.h, ht, cls: 'mid', var: p.var, poi: p.type });
-      W.pois.push({
-        x: (p.x0 + p.w / 2) * TILE, z: (p.y0 + p.h / 2) * TILE,
-        w: p.w * TILE, h: p.h * TILE, type: p.type,
-        doorX: (p.x0 + p.w / 2) * TILE, doorZ: (p.y0 + p.h + 0.6) * TILE,
-        wallZ: (p.y0 + p.h) * TILE + 0.12,
-        ht: ht
-      });
+    for (let i = 0; i < keys.length - 1; i++) {
+      if (day >= keys[i][0] && day <= keys[i + 1][0]) {
+        const t = (day - keys[i][0]) / (keys[i + 1][0] - keys[i][0]);
+        const mix = (a, b) => {
+          const r = ((a >> 16) + (((b >> 16) - (a >> 16)) * t)) | 0;
+          const g = ((a >> 8 & 255) + (((b >> 8 & 255) - (a >> 8 & 255)) * t)) | 0;
+          const bl = ((a & 255) + (((b & 255) - (a & 255)) * t)) | 0;
+          return (r << 16) | (g << 8) | bl;
+        };
+        return [mix(keys[i][1][0], keys[i + 1][1][0]), mix(keys[i][1][1], keys[i + 1][1][1]), mix(keys[i][1][2], keys[i + 1][1][2])];
+      }
     }
-    // хангары и башня на аэродроме
-    const hangar = (x0, y0, w, h, varId) => {
-      for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) set(x, y, T.BUILDING);
-      const ht = natH(varId, w, h, 0.95);
-      W.buildings.push({ x0, y0, w, h, ht, cls: 'ind', var: varId, poi: null });
-    };
-    hangar(114, 4, 8, 2, 'industrial/building-a');
-    hangar(103, 4, 6, 2, 'industrial/building-c');
-    W.buildings.push({ x0: 121, y0: 4, w: 1, h: 1, ht: 24, cls: 'tower', var: 'commercial/building-skyscraper-d', poi: null }); // диспетчерская башня
-
-    // --- клетки (кварталы) ---
-    const cells = [[3, 13], [17, 29], [33, 45], [49, 61], [65, 77], [81, 93], [97, 109], [113, 124]];
-
-    const free = (x, y) => {
-      const t = get(x, y);
-      return t === T.GRASS || t === T.PARK || t === T.LOT || t === T.PAVEMENT;
-    };
-    const placeB = (x0, y0, w, h, cls, ht, poi, fixedVar) => {
-      for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) if (!free(x, y)) return false;
-      const pool = Assets3D.POOLS[cls];
-      const varId = fixedVar || pool[randi(0, pool.length - 1)];
-      const v = Assets3D.v[varId];
-      const finalHt = (cls === 'tower' && ht) ? ht : natH(varId, w, h, 0.85);
-      for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) set(x, y, T.BUILDING);
-      W.buildings.push({ x0, y0, w, h, ht: finalHt, cls, var: varId, poi: poi || null });
-      return true;
-    };
-    const tree = (tx, tz) => {
-      if (!free(tx, tz) && get(tx, tz) !== T.SAND) return;
-      W.trees.push({ x: (tx + 0.5) * TILE + (rng() - 0.5) * 2, z: (tz + 0.5) * TILE + (rng() - 0.5) * 2,
-        kind: 'tree', sz: randi(0, 1) });
-    };
-    const palm = (tx, tz) => {
-      if (get(tx, tz) !== T.SAND && get(tx, tz) !== T.GRASS) return;
-      W.trees.push({ x: (tx + 0.5) * TILE + (rng() - 0.5) * 2, z: (tz + 0.5) * TILE + (rng() - 0.5) * 2, kind: 'palm' });
-    };
-
-    for (let cy = 0; cy < 8; cy++) for (let cx = 0; cx < 8; cx++) {
-      const [x0, x1] = cells[cx], [y0, y1] = cells[cy];
-      let district;
-      if (cy === 0 && cx >= 4) district = 'airport';
-      else if (cy === 0) district = 'countryside';
-      else if (cy >= 6) district = 'south';
-      else if (cx >= 6) district = 'industrial';
-      else if (cx <= 2) district = 'residential';
-      else if (cy >= 2 && cy <= 5) district = 'downtown';
-      else district = 'suburbs';
-
-      if (district === 'downtown') {
-        for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (free(x, y)) set(x, y, T.PAVEMENT);
-        const dCenter = dist(cx + 0.5, cy + 0.5, 3.5, 3.5);
-        const nB = 3 + (rng() < 0.5 ? 1 : 0);
-        for (let i = 0; i < nB; i++) {
-          const w = 4 + randi(0, 2), h = 3 + randi(0, 2);
-          const bx = x0 + randi(0, x1 - x0 - w + 1), by = y0 + randi(0, y1 - y0 - h + 1);
-          if (rng() < 0.5) {
-            // небоскрёб: чем ближе к центру, тем выше
-            const ht = Math.round(lerp(54, 26, clamp(dCenter / 4, 0, 1)) + rng() * 8);
-            placeB(bx, by, w, h, 'tower', ht);
-          } else placeB(bx, by, w, h, 'mid');
-        }
-        for (let i = 0; i < 3; i++) tree(x0 + randi(0, x1 - x0), y0 + randi(0, y1 - y0));
-      }
-      else if (district === 'residential') {
-        const nH = 4 + randi(0, 2);
-        for (let i = 0; i < nH; i++) {
-          const w = 2 + (rng() < 0.4 ? 1 : 0), h = 2 + (rng() < 0.4 ? 1 : 0);
-          placeB(x0 + randi(0, x1 - x0 - w + 1), y0 + randi(0, y1 - y0 - h + 1), w, h, 'house');
-        }
-        for (let i = 0; i < 5; i++) tree(x0 + randi(0, x1 - x0), y0 + randi(0, y1 - y0));
-      }
-      else if (district === 'suburbs') {
-        for (let i = 0; i < 3; i++) {
-          const w = 2, h = 2 + (rng() < 0.5 ? 1 : 0);
-          placeB(x0 + randi(0, x1 - x0 - w + 1), y0 + randi(0, y1 - y0 - h + 1), w, h, 'house');
-        }
-        for (let i = 0; i < 4; i++) tree(x0 + randi(0, x1 - x0), y0 + randi(0, y1 - y0));
-      }
-      else if (district === 'industrial') {
-        for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (free(x, y) && rng() < 0.5) set(x, y, T.LOT);
-        const nW = 2 + (rng() < 0.5 ? 1 : 0);
-        for (let i = 0; i < nW; i++) {
-          const w = 5 + randi(0, 2), h = 3 + randi(0, 2);
-          placeB(x0 + randi(0, x1 - x0 - w + 1), y0 + randi(0, y1 - y0 - h + 1), w, h, 'ind');
-        }
-        for (let i = 0; i < 2; i++)
-          W.props.push({ x: (x0 + randi(2, x1 - 2) + 0.5) * TILE, z: (y0 + randi(2, y1 - 2) + 0.5) * TILE, kind: 'tank' });
-      }
-      else if (district === 'south') {
-        if (cy === 7) {
-          for (let y = Math.max(y0, 118); y <= y1; y++)
-            for (let x = x0; x <= x1; x++) if (x > 8 && x < 120) set(x, y, T.SAND);
-          for (let i = 0; i < 3; i++) palm(x0 + randi(1, x1 - 1), 119 + randi(0, 3));
-          for (let i = 0; i < 2; i++) tree(x0 + randi(0, x1 - x0), y0 + randi(0, 1));
-        } else {
-          // парк
-          for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (free(x, y)) set(x, y, T.PARK);
-          // дорожки-аллеи
-          for (let x = x0; x <= x1; x++) set(x, (y0 + y1) >> 1, T.PAVEMENT);
-          for (let i = 0; i < 14; i++) tree(x0 + randi(0, x1 - x0), y0 + randi(0, y1 - y0));
-          // пруд в клетке (3,6)
-          if (cx === 3) for (let y = y0 + 3; y < y0 + 6; y++) for (let x = x0 + 4; x < x0 + 8; x++) if (get(x, y) === T.PARK) set(x, y, T.WATER);
-        }
-      }
-      else if (district === 'countryside') {
-        for (let i = 0; i < 4; i++) tree(x0 + randi(0, x1 - x0), y0 + randi(0, y1 - x0 > y1 - y0 ? y1 - y0 : x1 - x0));
-        if (rng() < 0.8) {
-          const w = 3, h = 2;
-          placeB(x0 + randi(1, x1 - x0 - w), y0 + randi(1, y1 - y0 - h), w, h, 'house');
-        }
-      }
-      // 'airport' — травяная зона + ВПП уже проставлены
-    }
-
-    // броварная полоса (променад) у пляжа
-    for (let x = 16; x < 112; x++) { set(x, 115, T.PAVEMENT); set(x, 116, T.PAVEMENT); }
-
-    // --- гарантированные «чистые» зоны для миссий (не зависят от сида) ---
-    const RESERVES = [
-      { x0: 65, x1: 72, y0: 51, y1: 58, t: T.PAVEMENT }, // парковка миссий в центре
-      { x0: 23, x1: 27, y0: 43, y1: 47, t: T.GRASS },    // точка «Защитника района»
-      { x0: 68, x1: 72, y0: 18, y1: 22, t: T.GRASS },
-      { x0: 73, x1: 77, y0: 36, y1: 40, t: T.GRASS },
-      { x0: 83, x1: 87, y0: 73, y1: 77, t: T.GRASS },
-      { x0: 103, x1: 107, y0: 43, y1: 47, t: T.LOT },
-      { x0: 98, x1: 100, y0: 21, y1: 23, t: T.LOT },   // водонапорная башня
-      { x0: 103, x1: 106, y0: 42, y1: 45, t: T.LOT }   // ветряк
-    ];
-    for (const r of RESERVES)
-      for (let y = r.y0; y <= r.y1; y++)
-        for (let x = r.x0; x <= r.x1; x++)
-          if (get(x, y) !== T.ROAD) set(x, y, r.t);
-    // убираем здания, зацепившие резервные зоны
-    W.buildings = W.buildings.filter(b => {
-      const bx1 = b.x0 + b.w - 1, by1 = b.y0 + b.h - 1;
-      return !RESERVES.some(r => b.x0 <= r.x1 && bx1 >= r.x0 && b.y0 <= r.y1 && by1 >= r.y0);
-    });
-    // деревья не сажать в зарезервированных зонах (пересаживаем лишние)
-    W.trees = W.trees.filter(t => {
-      const tx = Math.floor(t.x / TILE), ty = Math.floor(t.z / TILE);
-      return !RESERVES.some(r => tx >= r.x0 - 1 && tx <= r.x1 + 1 && ty >= r.y0 - 1 && ty <= r.y1 + 1);
-    });
-
-    // фиксированные промышленные ориентиры (не зависят от сида)
-    W.props.push({ x: 99.5 * TILE, z: 22.5 * TILE, kind: 'water-tower' });
-    W.props.push({ x: 104.5 * TILE, z: 43.5 * TILE, kind: 'windmill' });
-
-    W.buildRoadGraph();
-    // AABB зданий (для камеры)
-    for (const b of W.buildings)
-      W.aabbs.push({ minX: b.x0 * TILE, minZ: b.y0 * TILE, maxX: (b.x0 + b.w) * TILE, maxZ: (b.y0 + b.h) * TILE, h: b.ht });
-    W.buildMinimap();
+    return [0x3f7ec4, 0x8db8e2, 0xcfe2ee];
   },
 
-  tileAt(px, pz) {
-    const tx = Math.floor(px / TILE), ty = Math.floor(pz / TILE);
-    if (tx < 0 || ty < 0 || tx >= MAPW || ty >= MAPH) return T.WATER;
-    return this.tiles[ty * MAPW + tx];
-  },
-  solidAt(px, pz) { return !!SOLID_T[this.tileAt(px, pz)]; },
-  walkableAt(px, pz) { return !this.solidAt(px, pz); },
-  isRoadArea(px, pz) {
-    const t = this.tileAt(px, pz);
-    return t === T.ROAD || t === T.RUNWAY;
+  /* ---- небо: canvas-градиент, перекрашивается временем суток ---- */
+  _sky() {
+    const c = document.createElement('canvas'); c.width = 2; c.height = 256;
+    this.skyCtx = c.getContext('2d');
+    this.skyTex = new THREE.CanvasTexture(c);
+    this.skyTex.encoding = THREE.sRGBEncoding;
+    Game.scene.background = this.skyTex;
+    Game.scene.fog = new THREE.Fog(0xcfe2ee, 90, 420);
   },
 
-  // круг против твёрдых тайлов (XZ). Возвращает {x, z, hit}
-  collideCircle(px, pz, r) {
-    const tx0 = Math.floor((px - r) / TILE), tx1 = Math.floor((px + r) / TILE);
-    const ty0 = Math.floor((pz - r) / TILE), ty1 = Math.floor((pz + r) / TILE);
-    let nx = px, nz = pz, hit = false;
-    for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) {
-      if (tx < 0 || ty < 0 || tx >= MAPW || ty >= MAPH) continue;
-      if (!SOLID_T[this.tiles[ty * MAPW + tx]]) continue;
-      const cx = clamp(px, tx * TILE, (tx + 1) * TILE);
-      const cz = clamp(pz, ty * TILE, (ty + 1) * TILE);
-      const dx = px - cx, dz = pz - cz;
-      const d2 = dx * dx + dz * dz;
+  updateSky() {
+    const stops = this._skyStops(this.timeOfDay);
+    const x = this.skyCtx, g = x.createLinearGradient(0, 0, 0, 256);
+    g.addColorStop(0, '#' + stops[0].toString(16).padStart(6, '0'));
+    g.addColorStop(0.55, '#' + stops[1].toString(16).padStart(6, '0'));
+    g.addColorStop(1, '#' + stops[2].toString(16).padStart(6, '0'));
+    x.fillStyle = g; x.fillRect(0, 0, 2, 256);
+    this.skyTex.needsUpdate = true;
+    const night = clamp((this.timeOfDay < 6.5 || this.timeOfDay > 19.5) ? 1 : 0, 0, 1);
+    const dusk = (this.timeOfDay > 18 && this.timeOfDay < 20) || (this.timeOfDay > 5.5 && this.timeOfDay < 7.5);
+    this.sun.intensity = night ? 0.12 : (dusk ? 0.7 : 1.1);
+    this.hemi.intensity = night ? 0.32 : 0.75;
+    Game.scene.fog.color.setHex(night ? 0x10182a : (dusk ? 0xd8b090 : 0xcfe2ee));
+    if (Assets.bMat) Assets.bMat.emissiveIntensity = night ? 0.85 : (dusk ? 0.35 : 0);
+  },
+
+  /* ---- коллизии: окружность против AABB ---- */
+  collide(x, z, r) {
+    let hit = false;
+    for (const s of this.solids) {
+      const nx = clamp(x, s.x0, s.x1), nz = clamp(z, s.z0, s.z1);
+      const dx = x - nx, dz = z - nz, d2 = dx * dx + dz * dz;
       if (d2 < r * r) {
         hit = true;
-        const d = Math.sqrt(d2);
-        if (d < 0.001) { nx = tx * TILE + (dx < 0 ? 0 : TILE) + (dx < 0 ? 0 : r); nz = cz; }
-        else { const p = r - d; nx += dx / d * p; nz += dz / d * p; }
+        if (d2 > 1e-6) { const d = Math.sqrt(d2), push = (r - d) / d; x += dx * push; z += dz * push; }
+        else { // центр внутри — выталкиваем к ближайшей грани
+          const l = x - s.x0, rr = s.x1 - x, t = z - s.z0, b = s.z1 - z;
+          const m = Math.min(l, rr, t, b);
+          if (m === l) x = s.x0 - r; else if (m === rr) x = s.x1 + r; else if (m === t) z = s.z0 - r; else z = s.z1 + r;
+        }
       }
     }
-    nx = clamp(nx, TILE + r, WORLD_M - TILE - r);
-    nz = clamp(nz, TILE + r, WORLD_M - TILE - r);
-    return { x: nx, z: nz, hit };
+    const b = CITY - 2;
+    x = clamp(x, 2, b); z = clamp(z, 2, b);
+    return { x, z, hit };
   },
-
-  /* --- граф дорог: узлы на перекрёстках --- */
-  buildRoadGraph() {
-    const W = this;
-    W.nodes = [];
-    const N = LINES.length;
-    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++)
-      W.nodes.push({ x: (LINES[i] + 1) * TILE, z: (LINES[j] + 1) * TILE, i: j * N + i, adj: [] });
-    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
-      const idx = j * N + i;
-      if (i + 1 < N) { W.nodes[idx].adj.push(j * N + i + 1); W.nodes[j * N + i + 1].adj.push(idx); }
-      if (j + 1 < N) { W.nodes[idx].adj.push((j + 1) * N + i); W.nodes[(j + 1) * N + i].adj.push(idx); }
-    }
-    W._N = N;
-  },
-  // ближайший узел к точке
-  nearestNode(x, z) {
-    let bi = 0, bd = 1e9;
-    for (let i = 0; i < this.nodes.length; i++) {
-      const d = dist2(x, z, this.nodes[i].x, this.nodes[i].z);
-      if (d < bd) { bd = d; bi = i; }
-    }
-    return bi;
-  },
-  // BFS по графу узлов: путь из a в b (массив индексов узлов)
-  pathTo(a, b) {
-    const n = this.nodes.length, parent = new Int16Array(n).fill(-1);
-    const q = [a]; parent[a] = a;
-    let head = 0;
-    while (head < q.length) {
-      const cur = q[head++];
-      if (cur === b) break;
-      for (const nb of this.nodes[cur].adj)
-        if (parent[nb] < 0) { parent[nb] = cur; q.push(nb); }
-    }
-    if (parent[b] < 0) return [b];
-    const path = [];
-    for (let cur = b; cur !== a; cur = parent[cur]) path.push(cur);
-    path.push(a);
-    path.reverse();
-    return path;
-  },
-
-  /* --- миникарта (2D canvas, для HUD) --- */
-  buildMinimap() {
-    if (typeof document === 'undefined') return;
-    const c = makeCanvas(MAPW, MAPH);
-    const g = c.getContext('2d');
-    const cols = [
-      '#204a6e', // вода
-      '#d8c07a', // песок
-      '#3f3f44', // дорога
-      '#8f9296', // тротуар
-      '#4d8f3f', // трава
-      '#77777e', // здание
-      '#4a4a50', // ВПП
-      '#84868c', // мощение
-      '#6b6257', // площадка
-      '#3f7d36'  // парк
-    ];
-    for (let y = 0; y < MAPH; y++) for (let x = 0; x < MAPW; x++) {
-      g.fillStyle = cols[this.tiles[y * MAPW + x]];
-      g.fillRect(x, y, 1, 1);
-    }
-    this.minimap = c;
+  solidAt(x, z) {
+    for (const s of this.solids) if (x > s.x0 - .4 && x < s.x1 + .4 && z > s.z0 - .4 && z < s.z1 + .4) return true;
+    return false;
   }
 };

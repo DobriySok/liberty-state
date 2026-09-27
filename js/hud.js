@@ -1,264 +1,135 @@
 'use strict';
-/* ================= HUD (2D-канвас поверх WebGL) ================= */
+/* ================= HUD: минимапа, здоровье/броня, деньги, звёзды, скорость, миссии ================= */
 
 const HUD = {
-  ctx: null,
-  W: 0, H: 0,
-  toasts: [],
-  banner: null, // {lines: [], t}
-  MM: 150,      // размер миникарты
+  cv: null, x: null, hurt: 0, toastText: '', toastT: 0,
 
-  init(canvas) {
-    this.cv = canvas;
-    this.ctx = canvas.getContext('2d');
-    this.resize();
-    addEventListener('resize', () => this.resize());
-  },
-  resize() {
-    this.W = innerWidth; this.H = innerHeight;
-    this.cv.width = this.W; this.cv.height = this.H;
-  },
+  init() { this.cv = document.getElementById('hud'); this.x = this.cv.getContext('2d'); this.resize(); addEventListener('resize', () => this.resize()); },
+  resize() { this.cv.width = innerWidth; this.cv.height = innerHeight; },
 
-  toast(msg, t) { this.toasts.push({ msg, t: t || 3 }); if (this.toasts.length > 4) this.toasts.shift(); },
-  banner(lines, t) { this.banner = { lines: String(lines).split('\n'), t: t || 5 }; },
+  toast(t) { this.toastText = t; this.toastT = 3.4; },
+  hurtFlash() { this.hurt = 1; },
 
-  _star(ctx, x, y, r, filled) {
-    ctx.beginPath();
-    for (let i = 0; i < 10; i++) {
-      const a = -Math.PI / 2 + i * Math.PI / 5;
-      const rr = i % 2 === 0 ? r : r * 0.45;
-      const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr;
-      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  update(dt) { this.toastT = Math.max(0, this.toastT - dt); this.hurt = Math.max(0, this.hurt - dt * 2); },
+
+  draw() {
+    const x = this.x, W = this.cv.width, H = this.cv.height;
+    x.clearRect(0, 0, W, H);
+    const pl = Game.player;
+
+    /* --- мини-карта (левый низ) --- */
+    const MS = 150, mx = 18, my = H - MS - 18;
+    x.save();
+    x.beginPath(); x.arc(mx + MS / 2, my + MS / 2, MS / 2 + 4, 0, 7);
+    x.fillStyle = 'rgba(8,12,20,.75)'; x.fill();
+    x.strokeStyle = '#3a4a63'; x.lineWidth = 3; x.stroke();
+    x.clip();
+    const sc = 0.42, cxm = mx + MS / 2, cym = my + MS / 2;
+    x.fillStyle = '#20351c'; x.fillRect(mx, my, MS, MS);
+    // дороги
+    x.strokeStyle = '#5a6068'; x.lineWidth = 3;
+    const P = TILE * BLOCK;
+    for (let i = 0; i < LINES; i++) {
+      const px = cxm + (i * P - pl.x) * sc, pz = cym + (i * P - pl.z) * sc;
+      x.beginPath(); x.moveTo(px, my); x.lineTo(px, my + MS); x.stroke();
+      x.beginPath(); x.moveTo(mx, pz); x.lineTo(mx + MS, pz); x.stroke();
     }
-    ctx.closePath();
-    if (filled) { ctx.fillStyle = '#ff4040'; ctx.fill(); }
-    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  },
-
-  draw(game) {
-    const ctx = this.ctx;
-    ctx.clearRect(0, 0, this.W, this.H);
-    if (game.state === 'title') {
-      // лёгкий виньетный градиент под меню
-      ctx.fillStyle = 'rgba(0,0,0,0.25)';
-      ctx.fillRect(0, 0, this.W, this.H);
-      return;
+    // маркер миссии
+    if (Missions.marker && Missions.marker.visible) {
+      const mkx = cxm + (Missions.marker.userData.tx - pl.x) * sc, mkz = cym + (Missions.marker.userData.tz - pl.z) * sc;
+      x.fillStyle = '#ffd23e'; x.beginPath(); x.arc(clamp(mkx, mx + 6, mx + MS - 6), clamp(mkz, my + 6, my + MS - 6), 5, 0, 7); x.fill();
     }
+    // копы
+    x.fillStyle = '#5a8fff';
+    for (const u of Police.units) if (!u.v.dead) {
+      x.beginPath(); x.arc(cxm + (u.v.x - pl.x) * sc, cym + (u.v.z - pl.z) * sc, 3.4, 0, 7); x.fill();
+    }
+    // игрок — стрелка по yaw
+    x.save();
+    x.translate(cxm, cym); x.rotate(-pl.yaw + Math.PI);
+    x.fillStyle = '#ffffff'; x.beginPath(); x.moveTo(0, -7); x.lineTo(5, 6); x.lineTo(-5, 6); x.closePath(); x.fill();
+    x.restore();
+    x.restore();
 
-    const playing = game.state === 'playing';
+    /* --- здоровье/броня --- */
+    const bx = mx + 4, by = my - 26;
+    x.fillStyle = 'rgba(0,0,0,.5)'; x.fillRect(bx - 2, by - 2, MS - 4, 20);
+    x.fillStyle = '#37b24d'; x.fillRect(bx, by, (MS - 8) * pl.hp / 100, 7);
+    if (pl.armor > 0) { x.fillStyle = '#4dabf7'; x.fillRect(bx, by + 9, (MS - 8) * pl.armor / 100, 7); }
 
-    // ---------- миникарта ----------
-    if (World.minimap) {
-      const s = this.MM, x = 12, y = 12;
-      ctx.fillStyle = 'rgba(8,12,18,0.82)';
-      ctx.fillRect(x - 4, y - 4, s + 8, s + 8);
-      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
-      ctx.strokeRect(x - 4, y - 4, s + 8, s + 8);
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(World.minimap, x, y, s, s);
-      const map = (wx, wz) => [x + wx / WORLD_M * s, y + wz / WORLD_M * s];
-      // маркер миссии
-      const mk = Missions.marker();
-      if (mk) {
-        const [mx, mz] = map(mk.x, mk.z);
-        const pr = 4 + Math.sin(game.time * 5) * 1.5;
-        ctx.strokeStyle = '#ffd23f';
-        ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(mx, mz, pr + 2, 0, TAU); ctx.stroke();
-      }
-      // полицейские
-      const blink = Math.floor(game.time * 4) % 2 === 0;
-      for (const c of Cars.list) {
-        if (!c.ai || c.ai.kind !== 'police' || c.dead) continue;
-        const [cx, cz] = map(c.x, c.z);
-        if (blink) { ctx.fillStyle = '#ff4040'; ctx.fillRect(cx - 2, cz - 2, 4, 4); }
-      }
-      // ривалы
-      for (const t of Missions.targets) {
-        const [cx, cz] = map(t.x, t.z);
-        ctx.fillStyle = '#ff8040'; ctx.fillRect(cx - 2, cz - 2, 4, 4);
-      }
-      // удалённые игроки
-      for (const [id, r] of Net.remotes) {
-        const [cx, cz] = map(r.x, r.z);
-        ctx.fillStyle = '#40e0e0'; ctx.fillRect(cx - 2.5, cz - 2.5, 5, 5);
-      }
-      // игрок
-      const [px, pz] = map(Player.x, Player.z);
-      ctx.save();
-      ctx.translate(px, pz);
-      ctx.rotate(Math.PI - Player.angle);
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(3.6, 4); ctx.lineTo(-3.6, 4); ctx.closePath(); ctx.fill();
-      ctx.restore();
+    /* --- деньги --- */
+    x.font = 'italic 900 26px Arial';
+    x.textAlign = 'right';
+    x.lineWidth = 4; x.strokeStyle = '#000';
+    const mstr = '$' + Game.money;
+    x.strokeText(mstr, W - 24, 44); x.fillStyle = '#3ddc63'; x.fillText(mstr, W - 24, 44);
+
+    /* --- часы --- */
+    const hh = Math.floor(World.timeOfDay), mm = Math.floor((World.timeOfDay % 1) * 60);
+    x.font = 'bold 17px Consolas, monospace';
+    const tstr = (hh < 10 ? '0' : '') + hh + ':' + (mm < 10 ? '0' : '') + mm;
+    x.strokeText(tstr, W - 24, 68); x.fillStyle = '#dfe7f2'; x.fillText(tstr, W - 24, 68);
+
+    /* --- звёзды розыска --- */
+    x.textAlign = 'right'; x.font = '24px Arial';
+    for (let i = 0; i < 4; i++) {
+      const sx = W - 24 - i * 26;
+      x.strokeText('★', sx, 98);
+      x.fillStyle = i < Police.stars ? '#ffd23e' : 'rgba(255,255,255,.14)';
+      x.fillText('★', sx, 98);
+    }
+    if (Police.stars > 0) {
+      x.font = 'italic bold 15px Arial'; x.fillStyle = '#ff6b6b';
+      const blink = (Game.time * 2 | 0) % 2 === 0;
+      if (blink) { x.strokeText('WANTED', W - 24, 122); x.fillText('WANTED', W - 24, 122); }
     }
 
-    // ---------- панель справа сверху ----------
-    const rx = this.W - 14;
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'top';
-    // деньги
-    ctx.font = 'bold 22px "Courier New", monospace';
-    ctx.fillStyle = '#3f7';
-    ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 3;
-    ctx.fillText(fmtMoney(Player.money), rx, 14);
-    // звёзды розыска
-    for (let i = 0; i < 5; i++) this._star(ctx, rx - 26 - i * 26, 52, 9, i < Crimes.level);
-    // полосы здоровья и брони
-    const bw = 150, bx = rx - bw, by = 72;
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    ctx.fillRect(bx, by, bw, 10);
-    ctx.fillStyle = '#e04040';
-    ctx.fillRect(bx, by, bw * clamp(Player.health / 100, 0, 1), 10);
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    ctx.fillRect(bx, by + 13, bw, 7);
-    ctx.fillStyle = '#4a90d9';
-    ctx.fillRect(bx, by + 13, bw * clamp(Player.armor / 100, 0, 1), 7);
-    ctx.shadowBlur = 0;
+    /* --- оружие/патроны --- */
+    const w = pl.weapon, slot = pl.weapons[pl.wi];
+    x.font = 'italic 900 20px Arial';
+    x.strokeText(w.name.toUpperCase(), W - 24, H - 30); x.fillStyle = '#fff'; x.fillText(w.name.toUpperCase(), W - 24, H - 30);
+    x.font = 'bold 16px Consolas';
+    const astr = slot.ammo === Infinity ? '∞' : slot.ammo;
+    x.strokeText(astr, W - 24, H - 10); x.fillStyle = '#ffd23e'; x.fillText(astr, W - 24, H - 10);
 
-    // ---------- оружие слева снизу ----------
-    if (playing) {
-      const w = Player.weapon;
-      ctx.textAlign = 'left';
-      ctx.font = 'bold 16px "Courier New", monospace';
-      ctx.fillStyle = '#e8e8e8';
-      ctx.fillText(w.name, 14, this.H - 40);
-      ctx.font = '14px "Courier New", monospace';
-      ctx.fillStyle = '#9ab09a';
-      ctx.fillText(w.ammo === Infinity ? '∞' : w.ammo + ' патр.', 14, this.H - 22);
-      // скорость в машине
-      if (Player.inCar) {
-        const kmh = Math.round(Math.abs(Player.inCar.v) * 3.6);
-        ctx.textAlign = 'right';
-        ctx.font = 'bold 20px "Courier New", monospace';
-        ctx.fillStyle = '#ffd23f';
-        ctx.fillText(kmh + ' км/ч', this.W - 14, this.H - 30);
-      }
+    /* --- спидометр в машине --- */
+    if (pl.car) {
+      const kmh = Math.round(pl.car.speed * 3.6);
+      x.textAlign = 'center'; x.font = 'italic 900 34px Arial';
+      x.strokeText(kmh, W / 2, H - 26); x.fillStyle = kmh > 100 ? '#ff6b6b' : '#fff'; x.fillText(kmh, W / 2, H - 26);
+      x.font = 'bold 12px Arial'; x.fillStyle = '#9fb0c8'; x.fillText('км/ч', W / 2, H - 10);
     }
 
-    // ---------- подсказка ----------
-    if (playing && game.prompt) {
-      ctx.textAlign = 'center';
-      ctx.font = '14px "Courier New", monospace';
-      ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      const tw = ctx.measureText(game.prompt).width;
-      ctx.fillRect(this.W / 2 - tw / 2 - 8, this.H - 78, tw + 16, 22);
-      ctx.fillStyle = '#ffe9a0';
-      ctx.fillText(game.prompt, this.W / 2, this.H - 70);
+    /* --- миссия/таймер --- */
+    if (Missions.active) {
+      const a = Missions.active;
+      x.textAlign = 'center'; x.font = 'bold 15px Arial';
+      const label = a.kind === 'delivery' ? 'ДОСТАВКА' : 'ЗАЧИСТКА';
+      x.strokeText(label + '  ·  ' + Math.ceil(a.time) + ' c', W / 2, 34);
+      x.fillStyle = '#ffd23e'; x.fillText(label + '  ·  ' + Math.ceil(a.time) + ' c', W / 2, 34);
     }
 
-    // ---------- текст миссии ----------
-    const mt = Missions.text();
-    if (playing && mt) {
-      ctx.textAlign = 'center';
-      ctx.font = '14px "Courier New", monospace';
-      ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      const tw = ctx.measureText(mt).width;
-      ctx.fillRect(this.W / 2 - tw / 2 - 10, 12, tw + 20, 24);
-      ctx.fillStyle = '#d8ffe0';
-      ctx.fillText(mt, this.W / 2, 29);
+    /* --- тост --- */
+    if (this.toastT > 0) {
+      x.textAlign = 'center'; x.font = '600 16px Segoe UI';
+      x.globalAlpha = Math.min(1, this.toastT);
+      x.strokeText(this.toastText, W / 2, H - 64);
+      x.fillStyle = '#fff'; x.fillText(this.toastText, W / 2, H - 64);
+      x.globalAlpha = 1;
     }
 
-    // ---------- прицел ----------
-    if (playing && !Player.inCar && Player.alive) {
-      const m = game.mouse;
-      ctx.fillStyle = 'rgba(255,255,255,0.85)';
-      ctx.beginPath(); ctx.arc(m.x, m.y, 2.2, 0, TAU); ctx.fill();
-      ctx.strokeStyle = 'rgba(255,255,255,0.4)';
-      ctx.beginPath(); ctx.arc(m.x, m.y, 6, 0, TAU); ctx.stroke();
+    /* --- красная вспышка урона --- */
+    if (this.hurt > 0) {
+      x.fillStyle = `rgba(180,0,0,${this.hurt * 0.35})`;
+      x.fillRect(0, 0, W, H);
     }
 
-    // ---------- тосты ----------
-    ctx.textAlign = 'center';
-    ctx.font = '15px "Courier New", monospace';
-    let ty = this.H - 110;
-    for (const t of this.toasts) {
-      const a = clamp(t.t, 0, 1);
-      ctx.fillStyle = 'rgba(0,0,0,' + 0.55 * a + ')';
-      const tw = ctx.measureText(t.msg).width;
-      ctx.fillRect(this.W / 2 - tw / 2 - 10, ty - 16, tw + 20, 24);
-      ctx.fillStyle = 'rgba(255,240,190,' + a + ')';
-      ctx.fillText(t.msg, this.W / 2, ty);
-      ty -= 28;
-    }
-
-    // ---------- баннер ----------
-    if (this.banner) {
-      const b = this.banner;
-      const a = clamp(Math.min(b.t, (5 - b.t) * 2), 0, 1);
-      ctx.textAlign = 'center';
-      ctx.font = 'bold 30px "Courier New", monospace';
-      const lh = 40;
-      const y0 = this.H * 0.3 - (b.lines.length - 1) * lh / 2;
-      for (let i = 0; i < b.lines.length; i++) {
-        ctx.fillStyle = 'rgba(0,0,0,' + 0.6 * a + ')';
-        const tw = ctx.measureText(b.lines[i]).width;
-        ctx.fillRect(this.W / 2 - tw / 2 - 16, y0 + i * lh - 26, tw + 32, 36);
-        ctx.fillStyle = i === 0 ? 'rgba(255,210,63,' + a + ')' : 'rgba(230,230,230,' + a + ')';
-        ctx.fillText(b.lines[i], this.W / 2, y0 + i * lh);
-      }
-    }
-
-    // ---------- WASTED / BUSTED ----------
-    if (game.state === 'dead' || game.state === 'busted') {
-      ctx.fillStyle = 'rgba(0,0,0,0.45)';
-      ctx.fillRect(0, 0, this.W, this.H);
-      ctx.textAlign = 'center';
-      ctx.font = 'bold 64px "Courier New", monospace';
-      const t = game.state === 'dead' ? 'ТЫ ПОГИБ' : 'ТЕБЯ АРЕСТОВАЛИ';
-      ctx.fillStyle = game.state === 'dead' ? '#c0392b' : '#4a90d9';
-      ctx.shadowColor = 'rgba(0,0,0,0.9)'; ctx.shadowBlur = 8;
-      ctx.fillText(t, this.W / 2, this.H / 2);
-      ctx.shadowBlur = 0;
-      ctx.font = '16px "Courier New", monospace';
-      ctx.fillStyle = '#ccc';
-      ctx.fillText(game.state === 'dead' ? 'Потеряно 15% денег. Возрождение в больнице…' : 'Штраф $500. Возрождение в участке…', this.W / 2, this.H / 2 + 40);
-    }
-
-    // ---------- большая карта ----------
-    if (game.bigMap && World.minimap) {
-      const s = Math.min(this.W, this.H) * 0.8;
-      const x = (this.W - s) / 2, y = (this.H - s) / 2;
-      ctx.fillStyle = 'rgba(0,0,0,0.85)';
-      ctx.fillRect(x - 10, y - 10, s + 20, s + 20);
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(World.minimap, x, y, s, s);
-      const map = (wx, wz) => [x + wx / WORLD_M * s, y + wz / WORLD_M * s];
-      const mk = Missions.marker();
-      if (mk) {
-        const [mx, mz] = map(mk.x, mk.z);
-        ctx.strokeStyle = '#ffd23f'; ctx.lineWidth = 3;
-        ctx.beginPath(); ctx.arc(mx, mz, 10, 0, TAU); ctx.stroke();
-      }
-      const [px, pz] = map(Player.x, Player.z);
-      ctx.save();
-      ctx.translate(px, pz); ctx.rotate(Math.PI - Player.angle);
-      ctx.fillStyle = '#fff';
-      ctx.beginPath(); ctx.moveTo(0, -9); ctx.lineTo(7, 8); ctx.lineTo(-7, 8); ctx.closePath(); ctx.fill();
-      ctx.restore();
-      ctx.textAlign = 'center';
-      ctx.font = '14px "Courier New", monospace';
-      ctx.fillStyle = '#9ab09a';
-      ctx.fillText('КАРТА ГОРОДА — [M] закрыть', this.W / 2, y + s + 26);
-    }
-
-    // ---------- FPS ----------
-    ctx.textAlign = 'left';
-    ctx.font = '11px "Courier New", monospace';
-    ctx.fillStyle = 'rgba(140,160,140,0.7)';
-    ctx.fillText('FPS ' + Math.round(game.fps) + '  чанки: ' + City3D.chunks.size, 12, this.H - 14);
-  },
-
-  update(dt) {
-    for (let i = this.toasts.length - 1; i >= 0; i--) {
-      this.toasts[i].t -= dt;
-      if (this.toasts[i].t <= 0) this.toasts.splice(i, 1);
-    }
-    if (this.banner) {
-      this.banner.t -= dt;
-      if (this.banner.t <= 0) this.banner = null;
+    /* --- прицел --- */
+    if (!pl.car) {
+      x.strokeStyle = 'rgba(255,255,255,.85)'; x.lineWidth = 1.6;
+      const cxx = W / 2 + (pl.aiming ? 0 : 0), cyy = H / 2;
+      x.beginPath(); x.arc(cxx, cyy, 5, 0, 7); x.stroke();
+      x.beginPath(); x.moveTo(cxx - 9, cyy); x.lineTo(cxx - 3, cyy); x.moveTo(cxx + 3, cyy); x.lineTo(cxx + 9, cyy); x.stroke();
     }
   }
 };

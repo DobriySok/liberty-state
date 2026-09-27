@@ -1,432 +1,264 @@
 'use strict';
-/* ================= ГЛАВНЫЙ МОДУЛЬ: цикл, ввод, состояния ================= */
+/* ================= GAME: состояние, камера SA-стиля, хиты, эффекты, цикл ================= */
 
 const Game = {
-  state: 'title',
-  time: 0,
-  fps: 60,
-  keys: {},
-  mouse: { x: 0, y: 0, down: false },
-  bigMap: false,
-  deadT: 0,
-  bustT: 0,
-  prompt: '',
-  saveT: 0,
-  remotes: new Map(),
+  state: 'boot', time: 0, fps: 60, money: 350,
+  keys: {}, mouseDown: false,
+  player: null,
+  camYaw: 0, camDist: 7, camShakeV: 0,
+  _bullets: [], _puffs: [],
 
-  async init() {
+  async boot() {
     const canvas = document.getElementById('game');
-    // 1) загрузка 3D-ассетов (Kenney CC0) с прогрессом
     UI.init();
-    UI.loading(0);
-    try {
-      await Assets3D.load(p => UI.loading(p));
-    } catch (e) {
-      console.error('Assets3D: не удалось загрузить модели', e);
-      UI.loadingError();
-      return;
-    }
-    UI.hideLoading();
-    // 2) мир (City3D.init читает World.tiles при сборке земли)
-    World.gen(this._seed0());
-    City3D.init(canvas);
-    HUD.init(document.getElementById('hud'));
-    Bullets.init();
-    City3D.update(World.START.x, World.START.z);
-    Player.init(World.START.x, World.START.z);
+    UI.loading(0.02);
+    const renderer = this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true, powerPreference: "high-performance" });
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+    renderer.setSize(innerWidth, innerHeight, false);
+    this.scene = new THREE.Scene();
+    this.camera = new THREE.PerspectiveCamera(64, innerWidth / innerHeight, 0.3, 700);
 
-    /* ---------- ввод ---------- */
+    this.shadowMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28, depthWrite: false });
+
+    await Assets.load(p => UI.loading(p));
+    UI.hide();
+    UI.title();
+    this.state = 'title';
+    HUD.init();
+    World.gen(20260927);
+    World.timeOfDay = 10.0;
+    World.updateSky();
+    City.update();
+
+    // ввод
+    addEventListener('resize', () => {
+      this.camera.aspect = innerWidth / innerHeight;
+      this.camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight, false);
+      HUD.resize();
+    });
     addEventListener('keydown', e => {
       AudioSys.init(); AudioSys.resume();
       this.keys[e.code] = true;
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
-      if (e.code === 'Escape') {
-        if (this.bigMap) { this.bigMap = false; return; }
-        if (this.state === 'playing') this.togglePause(true);
-        else if (this.state === 'paused' || this.state === 'shop') this.togglePause(false);
-        return;
-      }
+      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+      if (e.code === 'Escape') { if (this.state === 'playing') this.togglePause(true); else if (this.state === 'paused') this.togglePause(false); }
       if (this.state !== 'playing') return;
       if (e.code === 'KeyE') this.interact();
-      if (e.code === 'KeyM') this.bigMap = !this.bigMap;
-      if (e.code === 'KeyN') { AudioSys.radio(!AudioSys.radioOn); AudioSys.radioOn = !AudioSys.radioOn; }
-      if (e.code === 'KeyF' && Player.inCar) AudioSys.horn();
-      for (let i = 0; i < 5; i++)
-        if (e.code === 'Digit' + (i + 1) && Player.weapons.length > i) { Player.wi = i; AudioSys.ui(); }
+      if (e.code === 'KeyN') AudioSys.radioToggle();
+      if (e.code === 'KeyM') AudioSys.next();
+      if (e.code === 'KeyF' && this.player.car) AudioSys._osc('sawtooth', 420, 380, 0.4, 0.15);
+      for (let i = 0; i < 3; i++) if (e.code === 'Digit' + (i + 1) && this.player.weapons.length > i) { this.player.wi = i; HUD.toast(this.player.weapon.name); }
     });
-    addEventListener('keyup', e => { this.keys[e.code] = false; });
-    canvas.addEventListener('mousemove', e => {
-      const r = canvas.getBoundingClientRect();
-      this.mouse.x = (e.clientX - r.left) * (innerWidth / Math.max(1, r.width));
-      this.mouse.y = (e.clientY - r.top) * (innerHeight / Math.max(1, r.height));
-    });
+    addEventListener('keyup', e => this.keys[e.code] = false);
     canvas.addEventListener('mousedown', e => {
       AudioSys.init(); AudioSys.resume();
-      if (e.button === 0) this.mouse.down = true;
+      if (document.pointerLockElement !== canvas) { canvas.requestPointerLock(); return; }
+      if (e.button === 0) this.mouseDown = true;
+      if (e.button === 2) this.player.aiming = true;
     });
-    addEventListener('mouseup', e => { if (e.button === 0) this.mouse.down = false; });
+    addEventListener('mouseup', e => {
+      if (e.button === 0) this.mouseDown = false;
+      if (e.button === 2 && this.player) this.player.aiming = false;
+    });
+    addEventListener('mousemove', e => {
+      if (document.pointerLockElement !== canvas || this.state !== 'playing') return;
+      const pl = this.player;
+      pl.yaw -= e.movementX * 0.0026;
+      pl.pitch = clamp(pl.pitch + e.movementY * 0.0022, -0.15, 1.1);
+    });
     addEventListener('contextmenu', e => e.preventDefault());
+    addEventListener('wheel', e => { this.camDist = clamp(this.camDist + Math.sign(e.deltaY) * 0.8, 3.5, 14); });
 
-    UI.title();
-
-    /* ---------- цикл: логика 30 Гц, рендер каждый кадр ---------- */
+    // цикл
     let last = performance.now(), acc = 0;
     const frame = now => {
       requestAnimationFrame(frame);
-      let dt = (now - last) / 1000;
-      last = now;
+      let dt = (now - last) / 1000; last = now;
       if (dt > 0.25) dt = 0.25;
-      this.fps = lerp(this.fps, 1 / Math.max(dt, 1e-4), 0.04);
+      this.fps = lerp(this.fps, 1 / Math.max(dt, 1e-4), 0.05);
       acc += dt;
       let n = 0;
       while (acc >= 1 / 30 && n < 3) { this.update(1 / 30); acc -= 1 / 30; n++; }
       if (n === 3) acc = 0;
+      this.render();
     };
     requestAnimationFrame(frame);
   },
 
-  _seed0() { return 10000 + (Date.now() % 90000); },
-
-  /* ---------- жизненный цикл игры ---------- */
-  _cleanupWorld() {
-    for (const c of [...Cars.list]) Cars.remove(c);
-    for (let i = Peds.list.length - 1; i >= 0; i--) { City3D.scene.remove(Peds.list[i].group); Peds.list.splice(i, 1); }
-    for (const p of Pickups.list) City3D.scene.remove(p.mesh);
-    Pickups.list = [];
-    Traffic.cars = [];
-    Police.cars = []; Police.patrol = null;
-    Rivals.clear();
-    Missions.active = false; Missions.targets = []; Missions.mCar = null;
-  },
-  _setupPlayer() {
-    Player.x = World.START.x; Player.z = World.START.z; Player.angle = 0;
-    Player.money = 250; Player.health = 100; Player.armor = 0;
-    Player.weapons = [{ id: 'fists', ammo: Infinity }, { id: 'pistol', ammo: 36 }];
-    Player.wi = 0; Player.inCar = null; Player.alive = true; Player.arrestT = 0;
-    if (!Player.group) Player.init(Player.x, Player.z);
-    else Player.group.visible = true;
-  },
-
   newGame() {
-    this._cleanupWorld();
-    World.gen(this._seed0());
-    City3D.resetStatics();
-    this._setupPlayer();
-    Missions.idx = 0;
-    Crimes.level = 0;
+    this.money = 350;
+    Player.hp = 100; Player.armor = 0; Player.money = 350;
+    Player.weapons = [{ id: 'fist', ammo: Infinity }, { id: 'pistol', ammo: 60 }]; Player.wi = 1;
+    Vehicles.clear(); Peds.clear(); Police.clearAll();
+    Missions.abort(false);
+    const start = World.spawnPts[Math.floor(World.spawnPts.length * 0.3)];
+    Player.x = start.x + 3; Player.z = start.z + 3;
+    if (!Player.group) Player.init(start.x + 3, start.z + 3);
+    else { Player.group.position.set(Player.x, 0, Player.z); Player.group.visible = true; }
+    Player.yaw = 0;
+    this.camYaw = 0;
+    Police.clear();
     this.state = 'playing';
-    Save.save();
-    HUD.banner('LIBERTY STATE\nДелай что хочешь. Город наблюдает.');
+    HUD.toast('LIBERTY STATE II. Делай что хочешь.');
     AudioSys.jingle();
-  },
-  loadGame() {
-    const s = Save.load();
-    if (!s) { this.newGame(); return; }
-    this._cleanupWorld();
-    World.gen(s.seed);
-    City3D.resetStatics();
-    this._setupPlayer();
-    Player.setPos(s.x, s.z);
-    Player.money = s.money;
-    Player.health = s.health;
-    Player.armor = s.armor;
-    Player.weapons = s.weapons.map(w => ({ id: w.id, ammo: w.ammo }));
-    Missions.idx = s.mission;
-    Crimes.level = 0;
-    this.state = 'playing';
-    HUD.banner('С возвращением в Либерти');
-  },
-  reseedWorld(seed) {
-    if (seed === World.seed || !seed) return;
-    this._cleanupWorld();
-    World.gen(seed);
-    City3D.resetStatics();
-    const c = World.collideCircle(Player.x, Player.z, 0.5);
-    Player.setPos(c.x, c.z);
-    HUD.toast('Мир синхронизирован (сид ' + seed + ')');
+    AudioSys.playTrack(0);
   },
 
   togglePause(on) {
-    if (on) {
-      this.state = 'paused';
-      UI.pause();
-      AudioSys.setEngine(false, 0);
-      AudioSys.setSiren(0);
-      AudioSys.setSkid(0);
-      if (AudioSys.radioOn) { AudioSys.radio(false); AudioSys.radioOn = false; }
-    } else {
-      this.state = 'playing';
-      UI.hide();
-    }
+    if (on) { this.state = 'paused'; UI.pause(); document.exitPointerLock && document.exitPointerLock(); }
+    else { this.state = 'playing'; UI.hide(); }
   },
-  toTitle() {
-    Net.stop();
-    this.state = 'title';
-    UI.title();
-    if (AudioSys.radioOn) { AudioSys.radio(false); AudioSys.radioOn = false; }
-    AudioSys.setEngine(false, 0);
-    AudioSys.setSiren(0);
-  },
-  toComplete() { this.state = 'complete'; UI.complete(); },
 
-  /* ---------- взаимодействие ---------- */
+  toTitle() { this.state = 'title'; UI.title(); document.exitPointerLock && document.exitPointerLock(); },
+
   interact() {
-    if (!Player.alive) return;
-    if (Player.inCar) {
-      const c = Player.inCar;
-      c.occupied = false;
-      // выход: ищем свободное место рядом
-      const fx = Math.sin(c.angle), fz = Math.cos(c.angle);
-      const rx = fz, rz = -fx; // вправо от носа
-      for (const s of [1, -1]) {
-        const px = c.x + rx * 2.3 * s, pz = c.z + rz * 2.3 * s;
-        if (World.walkableAt(px, pz)) {
-          Player.setPos(px, pz);
-          Player.inCar = null;
-          return;
-        }
+    const pl = this.player;
+    if (pl.car) { pl.leaveCar(); return; }
+    const v = Vehicles.nearest(pl.x, pl.z, 4);
+    if (v) {
+      if (Math.random() < 0.7) { // водитель убегает
+        Peds.spawnOne(v.x + 2, v.z + 2).then(p => { p.panicT = 5; });
+        HUD.toast('Водитель выбежал из машины!');
       }
-      c.occupied = true; // тесно — остаёмся
-      HUD.toast('Тесно, выйти некуда');
-      return;
-    }
-    // POI?
-    for (const poi of World.pois) {
-      if (dist(poi.doorX, poi.doorZ, Player.x, Player.z) < 5) { this.openPoi(poi); return; }
-    }
-    const c = Cars.nearest(Player.x, Player.z, 3.6);
-    if (c) {
-      c.occupied = true;
-      Player.inCar = c;
-      HUD.toast(Meshes.CAR_TYPES[c.type].name + ' — WASD езда, SPACE ручник');
-    }
-  },
-  openPoi(poi) {
-    switch (poi.type) {
-      case 'hospital': {
-        const cost = Player.health < 30 ? 0 : 100;
-        if (Player.health >= 100) HUD.toast('Ты здоров');
-        else if (Player.money >= cost) {
-          Player.money -= cost;
-          Player.health = 100;
-          HUD.toast(cost ? 'Лечение: -$' + cost : 'Бесплатное лечение');
-        } else HUD.toast('Нужно $' + cost);
-        break;
-      }
-      case 'police':
-        Crimes.level = 0;
-        Player.money = Math.max(0, Player.money - 500);
-        HUD.toast('Розыск снят. Штраф: $500');
-        break;
-      case 'shop':
-        this.state = 'shop';
-        UI.shop();
-        break;
-      case 'garage':
-        HUD.toast('Твой гараж. Здесь появляются машины для миссий.');
-        break;
-      case 'cafe':
-        if (Player.money >= 5 && Player.health < 100) {
-          Player.money -= 5;
-          Player.health = Math.min(100, Player.health + 30);
-          HUD.toast('Кофе: +30 здоровья');
-        } else HUD.toast(Player.money >= 5 ? 'Ты полон сил' : 'Нужно $5');
-        break;
+      this.crime(0.4);
+      pl.enterCar(v);
     }
   },
 
-  /* ---------- прицел: луч камеры → плоскость земли ---------- */
-  aimRay() {
-    const cam = City3D.camera;
-    const v = new THREE.Vector3(
-      this.mouse.x / innerWidth * 2 - 1,
-      -(this.mouse.y / innerHeight) * 2 + 1,
-      0.5
-    ).unproject(cam);
-    const dir = v.sub(cam.position).normalize();
-    if (dir.y >= -0.001) return null;
-    const t = (1.2 - cam.position.y) / dir.y;
-    if (t < 0 || t > 200) return null;
-    return { x: cam.position.x + dir.x * t, z: cam.position.z + dir.z * t };
+  /* ---------- попадания ---------- */
+  hitscan(x, z, ang, range, dmg, by) {
+    const dx = Math.sin(ang), dz = Math.cos(ang);
+    // пешеходы
+    for (const p of Peds.list) {
+      if (p.dead) continue;
+      const t = (p.x - x) * dx + (p.z - z) * dz;
+      if (t < 0.5 || t > range) continue;
+      const px = x + dx * t, pz = z + dz * t;
+      if (dist2(px, pz, p.x, p.z) < 0.65) {
+        p.hp -= dmg;
+        Peds.panic(p.x, p.z, 26);
+        if (p.hp <= 0) Peds.kill(p, by);
+        return;
+      }
+    }
+    // машины
+    for (const v of Vehicles.list) {
+      if (v.dead) continue;
+      const t = (v.x - x) * dx + (v.z - z) * dz;
+      if (t < 0.5 || t > range) continue;
+      if (dist2(x + dx * t, z + dz * t, v.x, v.z) < 3.4) {
+        v.hp -= dmg * 0.8;
+        if (v.driver === 'ai') { v.ai.tx = v.x + rand(-30, 30); v.ai.tz = v.z + rand(-30, 30); v.ai.target = null; }
+        return;
+      }
+    }
   },
 
-  /* ---------- смерть / арест ---------- */
-  onPlayerDeath() {
-    if (Missions.active) Missions.fail('смерть');
-    Rivals.clear();
-    if (Player.inCar) { Player.inCar.occupied = false; Player.inCar = null; }
-    Player.arrestT = 0;
-    Player.group.visible = false;
+  /* ---------- эффекты ---------- */
+  muzzle(x, y, z, ang) {
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0xffd070, transparent: true, opacity: 0.9 }));
+    s.position.set(x, y, z); s.scale.setScalar(0.5);
+    this.scene.add(s);
+    setTimeout(() => this.scene.remove(s), 45);
+  },
+  puff(x, y, z, fire) {
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({ color: fire ? 0xff7020 : 0x888888, transparent: true, opacity: 0.5 }));
+    s.position.set(x + rand(-0.4, 0.4), y, z + rand(-0.4, 0.4));
+    s.scale.setScalar(0.8);
+    s.userData.life = 1;
+    this.scene.add(s);
+    this._puffs.push({ s, vy: rand(1.2, 2.2) });
+  },
+  boom(x, z) {
+    AudioSys.boom();
+    for (let i = 0; i < 10; i++) setTimeout(() => this.puff(x + rand(-1.5, 1.5), rand(0.5, 2.5), z + rand(-1.5, 1.5), i < 5), i * 60);
+    this.camShake(0.8);
+    Peds.panic(x, z, 40);
+    for (const v of Vehicles.list) if (!v.dead && dist2(v.x, v.z, x, z) < 7 * 7) v.hp -= 55;
+    const pl = this.player;
+    if (!pl.car && dist2(pl.x, pl.z, x, z) < 6 * 6) pl.damage(45);
+  },
+  camShake(v) { this.camShakeV = Math.min(1, this.camShakeV + v); },
+
+  /* ---------- события ---------- */
+  crime(n) { Police.crime(n); },
+  wasted() {
     this.state = 'dead';
-    this.deadT = 3.2;
-    AudioSys.setEngine(false, 0);
+    AudioSys.siren(false);
+    UI.wasted(() => this.newGame(), 'ТЕБЯ УБИЛИ');
+    document.exitPointerLock && document.exitPointerLock();
   },
-  onBusted() {
-    if (Missions.active) Missions.fail('арест');
-    Rivals.clear();
-    if (Player.inCar) { Player.inCar.occupied = false; Player.inCar = null; }
-    Player.arrestT = 0;
-    this.state = 'busted';
-    this.bustT = 3;
-    AudioSys.setEngine(false, 0);
-  },
-  _respawn(hp, fine) {
-    const c = World.collideCircle(hp.doorX + 2, hp.doorZ + 2, 0.5);
-    Player.setPos(c.x, c.z);
-    Player.health = 100;
-    Player.armor = 0;
-    Player.alive = true;
-    Player.money = Math.max(0, Player.money - fine);
-    Crimes.level = 0;
-    Player.group.visible = true;
-    this.state = 'playing';
+  busted() {
+    this.state = 'dead';
+    UI.wasted(() => { this.money = Math.max(0, this.money - 150); this.newGame(); }, 'АРЕСТ · штраф $150');
+    document.exitPointerLock && document.exitPointerLock();
   },
 
-  /* ---------- удалённые игроки ---------- */
-  _removeRemoteVis(id) {
-    const v = this.remotes.get(id);
-    if (!v) return;
-    if (v.carVis) City3D.scene.remove(v.carVis);
-    if (v.ped) City3D.scene.remove(v.ped);
-    this.remotes.delete(id);
-  },
-  updateRemotes(dt) {
-    const now = performance.now();
-    if (!Net.on) {
-      for (const [id] of this.remotes) this._removeRemoteVis(id);
-      return;
-    }
-    for (const [id, r] of Net.remotes) {
-      if (now - r.last > 3500) { Net.remotes.delete(id); this._removeRemoteVis(id); continue; }
-      let vis = this.remotes.get(id);
-      if (!vis) { vis = { carVis: null, carType: null, carPaint: null, ped: null }; this.remotes.set(id, vis); }
-      // интерполяция (буфер 120 мс)
-      let sx = r.x, sz = r.z, sa = r.a;
-      const b = r.buf;
-      const t = now - 120;
-      for (let i = b.length - 1; i > 0; i--) {
-        if (b[i - 1].t <= t) {
-          const k = (t - b[i - 1].t) / Math.max(1, b[i].t - b[i - 1].t);
-          sx = lerp(b[i - 1].x, b[i].x, clamp(k, 0, 1));
-          sz = lerp(b[i - 1].z, b[i].z, clamp(k, 0, 1));
-          sa = angLerp(b[i - 1].a, b[i].a, clamp(k, 0, 1));
-          break;
-        }
-      }
-      if (r.car) {
-        if (vis.ped) { City3D.scene.remove(vis.ped); vis.ped = null; }
-        if (!vis.carVis || vis.carType !== r.car.type || vis.carPaint !== r.car.paint) {
-          this._removeRemoteVis(id);
-          vis = { carVis: null, carType: null, carPaint: null, ped: null };
-          this.remotes.set(id, vis);
-          vis.carVis = Meshes.car(r.car.type, r.car.paint);
-          City3D.scene.add(vis.carVis);
-          vis.carType = r.car.type;
-          vis.carPaint = r.car.paint;
-        }
-        vis.carVis.position.set(sx, 0, sz);
-        vis.carVis.rotation.y = sa;
-        if (r.car.hp < 40 && Math.random() < 0.25)
-          City3D.puff(sx + rand(-0.5, 0.5), 1.2, sz + rand(-0.5, 0.5), 0, 2, 0, 0.7, 0.25, 0.25, 0.27, 0.8);
-      } else {
-        if (vis.carVis) { City3D.scene.remove(vis.carVis); vis.carVis = null; }
-        if (!vis.ped) { vis.ped = Meshes.ped(0xe0703f, 0xd8a878, false); City3D.scene.add(vis.ped); }
-        vis.ped.position.set(sx, 0, sz);
-        vis.ped.rotation.y = sa;
-        Assets3D.setWalk(vis.ped, Math.hypot(sx - (vis.ped._lx || sx), sz - (vis.ped._lz || sz)) / Math.max(dt, 1e-3), dt);
-        vis.ped._lx = sx; vis.ped._lz = sz;
-      }
-    }
-    for (const [id] of this.remotes) if (!Net.remotes.has(id)) this._removeRemoteVis(id);
+  /* ---------- камера (SA-стиль: орбита вокруг героя/машины) ---------- */
+  updateCamera(dt) {
+    const pl = this.player, C = this.camera;
+    const tx = pl.x, tz = pl.z;
+    const inCar = !!pl.car;
+    const aim = pl.aiming && !inCar;
+    const dist = aim ? 2.6 : (inCar ? 8.5 + pl.car.speed * 0.12 : this.camDist);
+    const h = aim ? 1.7 : (inCar ? 3.4 : 2.6);
+    // в машине камера плавно догоняет курсор
+    if (inCar) this.camYaw = angLerp(this.camYaw, pl.yaw - Math.PI, Math.min(1, 2.2 * dt));
+    const yaw = this.camYaw;
+    const cx = tx - Math.sin(yaw) * Math.cos(pl.pitch) * dist;
+    const cz = tz - Math.cos(yaw) * Math.cos(pl.pitch) * dist;
+    const cy = h + Math.sin(pl.pitch) * dist;
+    const k = 1 - Math.exp(-9 * dt);
+    C.position.lerp(new THREE.Vector3(cx, cy, cz), k);
+    const sh = this.camShakeV * 0.25;
+    this.camShakeV = Math.max(0, this.camShakeV - dt * 2.5);
+    C.position.x += rand(-sh, sh); C.position.y += rand(-sh, sh);
+    const look = new THREE.Vector3(tx, (aim ? 1.5 : 1.1), tz);
+    if (aim) { look.x += Math.sin(pl.yaw) * 8; look.z += Math.cos(pl.yaw) * 8; }
+    C.lookAt(look);
   },
 
-  /* ---------- обновление ---------- */
+  /* ---------- update ---------- */
   update(dt) {
     this.time += dt;
+    if (this.state === 'playing') {
+      World.timeOfDay = (World.timeOfDay + dt / 60) % 24;   // сутки = 24 минуты
+      if ((this.time * 2 | 0) % 2 === 0) World.updateSky();
+      Player.update(dt);
+      Vehicles.update(dt);
+      Vehicles.traffic(dt);
+      Peds.update(dt);
+      Police.update(dt);
+      AudioSys.siren(Police.stars > 0 && this.player.car != null);
+      Missions.update(dt);
+      if (Player.car) AudioSys.engine(clamp(Player.car.speed / 30, 0, 1), true);
+      else AudioSys.engine(0, false);
+    }
+    for (const p of [...this._puffs]) {
+      p.s.position.y += p.vy * dt;
+      p.s.scale.multiplyScalar(1 + 1.6 * dt);
+      p.s.material.opacity -= 0.7 * dt;
+      if (p.s.material.opacity <= 0) { this.scene.remove(p.s); this._puffs.splice(this._puffs.indexOf(p), 1); }
+    }
+    if (this.player) this.updateCamera(dt);
     HUD.update(dt);
+  },
 
+  render() {
     if (this.state === 'title') {
-      const t = this.time * 0.05;
-      const cx = WORLD_M / 2, cz = WORLD_M / 2;
-      City3D.update(cx, cz);
-      City3D.camera.position.set(cx + Math.cos(t) * 120, 70, cz + Math.sin(t) * 120);
-      City3D.camera.lookAt(cx, 8, cz);
-      City3D.render(dt);
-      HUD.draw(this);
-      return;
+      const t = this.time * 0.06;
+      const c = CITY / 2;
+      this.camera.position.set(c + Math.cos(t) * 150, 90, c + Math.sin(t) * 150);
+      this.camera.lookAt(c, 0, c);
     }
-
-    if (this.state === 'paused' || this.state === 'shop' || this.state === 'complete') {
-      City3D.render(dt);
-      HUD.draw(this);
-      return;
-    }
-
-    const playing = this.state === 'playing';
-
-    if (playing && Player.alive) Player.update(dt);
-    Cars.updateAll(dt);
-    Peds.updateAll(dt);
-    Traffic.update(dt);
-    Police.update(dt);
-    Rivals.update(dt);
-    Bullets.update(dt);
-    Pickups.update(dt);
-    Crimes.update(dt);
-    if (playing) Missions.update(dt);
-
-    if (playing) {
-      Net.tick();
-      this.saveT += dt;
-      if (this.saveT > 45) { this.saveT = 0; Save.save(); }
-      // сирена по близости
-      let siren = 0;
-      for (const c of Cars.list)
-        if (c.ai && c.ai.kind === 'police' && !c.dead) {
-          const d = dist(c.x, c.z, Player.x, Player.z);
-          if (d < 90) siren = Math.max(siren, 1 - d / 90);
-        }
-      AudioSys.setSiren(siren);
-      if (Player.inCar)
-        AudioSys.setEngine(true, clamp(Math.abs(Player.inCar.v) / Meshes.CAR_TYPES[Player.inCar.type].max, 0, 1));
-      else AudioSys.setEngine(false, 0);
-      // подсказка
-      this.prompt = '';
-      if (Player.inCar) this.prompt = '[E] Выйти из машины';
-      else {
-        for (const poi of World.pois)
-          if (dist(poi.doorX, poi.doorZ, Player.x, Player.z) < 5) {
-            this.prompt = { hospital: '[E] Больница', police: '[E] Полиция (снять розыск)', shop: '[E] Магазин', garage: '[E] Гараж', cafe: '[E] Кофейня' }[poi.type] || '';
-            break;
-          }
-        if (!this.prompt && Cars.nearest(Player.x, Player.z, 3.6)) this.prompt = '[E] Сесть в машину';
-      }
-      // камера
-      const onFoot = !Player.inCar;
-      const speed01 = Player.inCar ? clamp(Math.abs(Player.inCar.v) / 30, 0, 1) : 0;
-      City3D.updateCamera(Player.x, Player.z, onFoot ? Player.angle : Player.inCar.angle, speed01, onFoot, dt);
-      City3D.update(Player.x, Player.z);
-    } else if (this.state === 'dead') {
-      this.deadT -= dt;
-      if (this.deadT <= 0) {
-        const h = World.pois.find(p => p.type === 'hospital');
-        this._respawn(h, Math.floor(Player.money * 0.15));
-      }
-    } else if (this.state === 'busted') {
-      this.bustT -= dt;
-      if (this.bustT <= 0) {
-        const p = World.pois.find(poi => poi.type === 'police');
-        this._respawn(p, 500);
-      }
-    } else {
-      City3D.update(Player.x, Player.z);
-    }
-
-    this.updateRemotes(dt);
-    City3D.updateShadows();
-    City3D.render(dt);
-    HUD.draw(this);
+    this.renderer.render(this.scene, this.camera);
+    if ((this.state === 'playing' || this.state === 'paused' || this.state === 'dead') && this.player && HUD.x) HUD.draw();
   }
 };
 
-addEventListener('DOMContentLoaded', () => Game.init());
+/* мини-алиасы */
+const City = { update() { World.updateSky(); } };
+Game.player = Player;
+
+Game.boot();

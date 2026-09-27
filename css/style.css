@@ -1,160 +1,19 @@
-* { margin: 0; padding: 0; box-sizing: border-box; }
-html, body {
-  width: 100%; height: 100%;
-  background: #0a0c10;
-  overflow: hidden;
-  font-family: "Courier New", Consolas, monospace;
-  color: #e8e8e8;
-}
-#wrap {
-  position: fixed; inset: 0;
-  overflow: hidden;
-}
-#game {
-  position: absolute; inset: 0;
-  width: 100%; height: 100%;
-  display: block;
-  background: #000;
-}
-#hud {
-  position: absolute; inset: 0;
-  width: 100%; height: 100%;
-  display: block;
-  pointer-events: none;
-  z-index: 5;
-}
-#overlay {
-  position: absolute; inset: 0;
-  display: flex; align-items: center; justify-content: center;
-  pointer-events: none;
-  z-index: 10;
-}
-#overlay.hidden { display: none; }
-#overlay .panel {
-  pointer-events: auto;
-  background: rgba(10, 14, 20, 0.96);
-  border: 2px solid #3d5a3d;
-  box-shadow: 0 0 0 2px #0a0c10, 0 0 40px rgba(80, 200, 120, 0.15);
-  padding: 26px 34px;
-  max-width: 640px;
-  max-height: 92vh;
-  overflow-y: auto;
-}
-.logo {
-  font-size: 44px;
-  font-weight: bold;
-  letter-spacing: 6px;
-  text-align: center;
-  color: #ffd23f;
-  text-shadow: 3px 3px 0 #b3541e, 6px 6px 0 rgba(0,0,0,.6);
-  margin-bottom: 4px;
-}
-.subtitle {
-  text-align: center;
-  color: #8fae8f;
-  font-size: 12px;
-  letter-spacing: 2px;
-  margin-bottom: 22px;
-}
-.menu-btn {
-  display: block;
-  width: 100%;
-  text-align: left;
-  background: none;
-  border: 1px solid transparent;
-  color: #d8d8d8;
-  font-family: inherit;
-  font-size: 16px;
-  letter-spacing: 2px;
-  padding: 9px 14px;
-  margin: 5px 0;
-  cursor: pointer;
-}
-.menu-btn:hover, .menu-btn.active {
-  background: rgba(255, 210, 63, 0.1);
-  border-color: #ffd23f;
-  color: #ffd23f;
-}
-.menu-btn:disabled { opacity: 0.35; cursor: default; }
-.menu-btn.small { font-size: 13px; padding: 6px 10px; width: auto; }
-h2.menu-title {
-  color: #ffd23f;
-  font-size: 20px;
-  letter-spacing: 3px;
-  margin-bottom: 14px;
-  border-bottom: 1px solid #3d5a3d;
-  padding-bottom: 8px;
-}
-.kv { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; }
-.kv b { color: #ffd23f; font-weight: normal; }
-label.chk { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; cursor: pointer; }
-input[type=text], input[type=password], textarea, select {
-  font-family: inherit;
-  background: #10151c;
-  border: 1px solid #3d5a3d;
-  color: #e8e8e8;
-  padding: 7px 9px;
-  font-size: 13px;
-  width: 100%;
-}
-textarea { resize: vertical; font-size: 11px; }
-.btn-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-.tab-row { display: flex; gap: 6px; margin-bottom: 14px; }
-.tab {
-  flex: 1; text-align: center;
-  border: 1px solid #3d5a3d;
-  padding: 8px; cursor: pointer;
-  font-size: 13px; letter-spacing: 1px;
-  color: #9ab09a;
-}
-.tab.active { background: rgba(255,210,63,.12); color: #ffd23f; border-color: #ffd23f; }
-.note { font-size: 11px; color: #7d8f7d; margin-top: 10px; line-height: 1.5; }
-.note.warn { color: #d8a25a; }
-#net-status { font-size: 12px; color: #7fd87f; min-height: 18px; margin-top: 8px; }
-.shop-row {
-  display: flex; justify-content: space-between; align-items: center;
-  border-bottom: 1px solid #223022;
-  padding: 8px 2px;
-  font-size: 14px;
-}
-.shop-row .price { color: #7fd87f; }
-.shop-row button {
-  font-family: inherit;
-  background: #1a241a;
-  border: 1px solid #3d5a3d;
-  color: #ffd23f;
-  padding: 4px 14px;
-  cursor: pointer;
-  font-size: 12px;
-}
-.shop-row button:disabled { opacity: .35; cursor: default; }
-.shop-row button:hover:not(:disabled) { border-color: #ffd23f; }
-.hidden { display: none !important; }
-.footer {
-  text-align: center; font-size: 10px; color: #556555;
-  margin-top: 18px; letter-spacing: 1px; line-height: 1.6;
-}
-/* ---------- экран загрузки ---------- */
-.loading {
-  position: fixed; inset: 0;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  background: #0a0c10;
-  z-index: 100;
-  gap: 22px;
-  transition: opacity .5s;
-}
-.loading.done { opacity: 0; pointer-events: none; }
-.loading .logo { margin-bottom: 0; }
-.load-bar {
-  width: min(420px, 70vw);
-  height: 14px;
-  border: 2px solid #3d5a3d;
-  background: #10151c;
-  overflow: hidden;
-}
-.load-fill {
-  height: 100%; width: 0%;
-  background: linear-gradient(90deg, #ffd23f, #7fd87f);
-  transition: width .18s;
-}
-.load-txt { font-size: 13px; letter-spacing: 2px; color: #8fae8f; }
+html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#0a0d12;font-family:'Segoe UI',Arial,sans-serif;user-select:none}
+#wrap{position:relative;width:100%;height:100%}
+#game{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
+#hud{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+#overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(5,8,14,.55);backdrop-filter:blur(3px);pointer-events:auto}
+#overlay.hidden{display:none}
+.panel{background:linear-gradient(180deg,rgba(12,17,26,.96),rgba(8,11,18,.96));border:1px solid #2b3b52;border-radius:10px;padding:26px 34px;min-width:320px;max-width:560px;color:#dfe7f2;box-shadow:0 12px 60px rgba(0,0,0,.6);text-align:center}
+.logo{font-size:44px;font-weight:900;letter-spacing:4px;color:#ffd23e;text-shadow:0 3px 0 #7c4a00,0 6px 18px rgba(0,0,0,.7)}
+.logo .l2{color:#f2f6fb}
+.subtitle{font-size:11px;letter-spacing:3px;color:#8fa3bd;margin:6px 0 18px}
+.menu-btn{display:block;width:100%;margin:7px 0;padding:11px 16px;background:#16202f;border:1px solid #2b3b52;border-radius:7px;color:#e8eef7;font-size:15px;font-weight:600;letter-spacing:1px;cursor:pointer;transition:all .12s}
+.menu-btn:hover{background:#22314a;border-color:#4a6a94;transform:translateY(-1px)}
+.menu-btn.small{padding:7px;font-size:12px;color:#a9bdd8}
+.menu-title{margin:0 0 14px;font-size:20px;letter-spacing:2px;color:#ffd23e}
+.help{text-align:left;font-size:13px;line-height:1.85;color:#c6d4e6;margin:8px 0}
+.help b{color:#ffd23e;display:inline-block;min-width:86px}
+.credits{font-size:10.5px;color:#6c7f98;line-height:1.7;margin-top:14px}
+#loadbar{width:100%;height:6px;background:#101826;border-radius:3px;margin-top:14px;overflow:hidden}
+#loadbar>div{height:100%;width:0%;background:linear-gradient(90deg,#ffd23e,#ff9d2e);transition:width .2s}
